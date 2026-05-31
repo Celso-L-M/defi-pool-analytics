@@ -1,0 +1,217 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-display: "Space Grotesk", sans-serif;
+    --font-body: "Space Grotesk", sans-serif;
+    --font-mono: "Geist Mono", monospace;
+    --radius: 0.625rem;
+
+    --background: 0.05 0 0;
+    --foreground: 0.95 0 0;
+    --card: 0.08 0.02 260;
+    --card-foreground: 0.95 0 0;
+    --popover: 0.1 0.02 260;
+    --popover-foreground: 0.95 0 0;
+
+    --primary: 0.7 0.2 210;
+    --primary-foreground: 0.05 0 0;
+
+    --secondary: 0.12 0.02 260;
+    --secondary-foreground: 0.85 0 0;
+    --muted: 0.15 0.01 260;
+    --muted-foreground: 0.6 0 0;
+
+    --accent: 0.75 0.25 150;
+    --accent-foreground: 0.05 0 0;
+
+    --destructive: 0.6 0.22 25;
+    --destructive-foreground: 0.95 0 0;
+
+    --border: 0.15 0.02 210;
+    --input: 0.12 0.02 260;
+    --ring: 0.7 0.2 210;
+
+    --chart-1: 0.7 0.22 210;
+    --chart-2: 0.75 0.25 150;
+    --chart-3: 0.65 0.18 120;
+    --chart-4: 0.72 0.2 55;
+    --chart-5: 0.75 0.22 285;
+
+    --sidebar: 0.08 0.02 260;
+    --sidebar-foreground: 0.95 0 0;
+    --sidebar-primary: 0.7 0.2 210;
+    --sidebar-primary-foreground: 0.05 0 0;
+    --sidebar-accent: 0.15 0.01 260;
+    --sidebar-accent-foreground: 0.85 0 0;
+    --sidebar-border: 0.15 0.02 210;
+    --sidebar-ring: 0.75 0.25 150;
+  }
+
+  .dark {
+    --background: 0.05 0 0;
+    --foreground: 0.95 0 0;
+    --card: 0.08 0.02 260;
+    --card-foreground: 0.95 0 0;
+    --popover: 0.1 0.02 260;
+    --popover-foreground: 0.95 0 0;
+
+    --primary: 0.7 0.2 210;
+    --primary-foreground: 0.05 0 0;
+
+    --secondary: 0.12 0.02 260;
+    --secondary-foreground: 0.85 0 0;
+    --muted: 0.15 0.01 260;
+    --muted-foreground: 0.6 0 0;
+
+    --accent: 0.75 0.25 150;
+    --accent-foreground: 0.05 0 0;
+
+    --destructive: 0.6 0.22 25;
+    --destructive-foreground: 0.95 0 0;
+
+    --border: 0.15 0.02 210;
+    --input: 0.12 0.02 260;
+    --ring: 0.7 0.2 210;
+
+    --chart-1: 0.7 0.22 210;
+    --chart-2: 0.75 0.25 150;
+    --chart-3: 0.65 0.18 120;
+    --chart-4: 0.72 0.2 55;
+    --chart-5: 0.75 0.22 285;
+
+    --sidebar: 0.08 0.02 260;
+    --sidebar-foreground: 0.95 0 0;
+    --sidebar-primary: 0.7 0.2 210;
+    --sidebar-primary-foreground: 0.05 0 0;
+    --sidebar-accent: 0.15 0.01 260;
+    --sidebar-accent-foreground: 0.85 0 0;
+    --sidebar-border: 0.15 0.02 210;
+    --sidebar-ring: 0.75 0.25 150;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+  }
+}
+
+@layer utilities {
+  @font-face {
+    font-family: "Space Grotesk";
+    src: url("/assets/fonts/SpaceGrotesk.woff2") format("woff2");
+    font-weight: 400 700;
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: "Geist Mono";
+    src: url("/assets/fonts/GeistMono.woff2") format("woff2");
+    font-weight: 400 500;
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: url("/assets/fonts/JetBrainsMono.woff2") format("woff2");
+    font-weight: 400 500;
+    font-display: swap;
+  }
+
+  .transition-smooth {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .shadow-elevated {
+    box-shadow: 0 8px 16px -2px rgba(0, 0, 0, 0.08), 0 4px 6px -2px
+      rgba(0, 0, 0, 0.04);
+  }
+
+  .shadow-card {
+    box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.04), 0 1px 2px 0 rgba(0, 0, 0, 0.02);
+  }
+
+  .border-accent-subtle {
+    border-color: oklch(var(--accent) / 0.3);
+  }
+
+  .text-accent-secondary {
+    color: oklch(var(--accent) / 0.8);
+  }
+
+  /* Glassmorphism card effect */
+  .glass-card {
+    backdrop-filter: blur(8px);
+    background: oklch(var(--card) / 0.85);
+    border: 1px solid oklch(var(--border) / 0.2);
+  }
+
+  .glass-card:hover {
+    background: oklch(var(--card) / 0.95);
+    border-color: oklch(var(--primary) / 0.4);
+    box-shadow: 0 0 20px oklch(var(--primary) / 0.15), 0 8px 16px -2px
+      rgba(0, 0, 0, 0.1);
+  }
+
+  /* Glow effects for financial metrics */
+  .glow-primary {
+    text-shadow: 0 0 8px oklch(var(--primary) / 0.6), 0 0 16px
+      oklch(var(--primary) / 0.3);
+  }
+
+  .glow-accent {
+    text-shadow: 0 0 8px oklch(var(--accent) / 0.7), 0 0 16px
+      oklch(var(--accent) / 0.4);
+  }
+
+  .glow-destructive {
+    text-shadow: 0 0 8px oklch(var(--destructive) / 0.6), 0 0 16px
+      oklch(var(--destructive) / 0.3);
+  }
+
+  /* Card lift animation on hover */
+  .card-hover {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .card-hover:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow: 0 12px 24px -4px rgba(0, 0, 0, 0.15);
+  }
+
+  /* Neon green accent glow */
+  .accent-glow {
+    color: oklch(var(--accent));
+    font-weight: 600;
+    text-shadow: 0 0 12px oklch(var(--accent) / 0.8);
+  }
+
+  /* Electric blue accent glow */
+  .primary-glow {
+    color: oklch(var(--primary));
+    font-weight: 600;
+    text-shadow: 0 0 12px oklch(var(--primary) / 0.6);
+  }
+
+  /* Chart container styling */
+  .chart-container {
+    background: oklch(var(--card) / 0.6);
+    border: 1px solid oklch(var(--border) / 0.15);
+    backdrop-filter: blur(4px);
+  }
+}
+
+@keyframes aiMsgFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

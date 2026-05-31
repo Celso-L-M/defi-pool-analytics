@@ -1,0 +1,27 @@
+{
+  "overview": "Premium DeFi liquidity pool analytics dashboard supporting Uniswap, PancakeSwap, Raydium, ICP, ICPswap, and KongSwap protocols. Features a Bloomberg Terminal-inspired dark theme with advanced analytics, real-time tracking, and cross-chain comparison. Now includes a dedicated Derivatives page with live funding rate trackers, open interest charts, and long/short ratio panels powered by real Binance public APIs.",
+  "features": [
+    "Live funding rate tracker with Binance API integration",
+    "Open interest charts with historical trends",
+    "Long/short ratio panels with interactive time period selection",
+    "Pool comparison with watchlist and price alerts",
+    "Position tracker with ICPswap/KongSwap API integration",
+    "Impermanent loss calculator with ICP principal support",
+    "AI Assistant with decision history and performance tracker",
+    "CSV/PDF export for tables",
+    "Real-time notification system",
+    "Glassmorphism dark theme with glowing effects"
+  ],
+  "category": "finance",
+  "tags": [
+    "defi",
+    "analytics",
+    "derivatives",
+    "liquidity-pools",
+    "cryptocurrency",
+    "uniswap",
+    "icp",
+    "blockchain"
+  ],
+  "last_updated": "2026-05-05T23:52:28.238Z"
+}
