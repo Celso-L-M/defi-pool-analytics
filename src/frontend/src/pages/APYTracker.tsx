@@ -1,15 +1,15 @@
-import { Breadcrumb } from "@/components/Breadcrumb";
-import { DataSourceBadge } from "@/components/DataSourceBadge";
-import { HELP_TERMS, HelpIcon } from "@/components/HelpIcon";
+import { EmptyState, ErrorState, LoadingState } from "@/components/DataStates";
+import { DemoBadge } from "@/components/DemoBadge";
 import { ProtocolBadge } from "@/components/ProtocolBadge";
-import { SkeletonChart, SkeletonTable } from "@/components/SkeletonLoaders";
-import { MOCK_POOLS, PROTOCOL_METADATA } from "@/data/mockData";
+import { RiskBadge } from "@/components/RiskBadge";
+import { Button } from "@/components/ui/button";
+import { usePoolHistory, usePools } from "@/hooks/useLiveData";
 import { cn } from "@/lib/utils";
-import type { Pool, Protocol } from "@/types/defi";
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import type { Pool, PoolHistoryPoint, Protocol } from "@/types/defi";
+import { ArrowDownRight, ArrowUpRight, Check, Minus } from "lucide-react";
+import { useMemo, useState } from "react";
 import {
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -18,8 +18,13 @@ import {
   YAxis,
 } from "recharts";
 
-type Timeframe = "1D" | "7D" | "30D";
+type RangeDays = 7 | 30 | 90;
 type ProtocolFilter = "all" | Protocol;
+
+const RANGES: RangeDays[] = [7, 30, 90];
+const MAX_SELECTED = 5;
+const TABLE_PAGE = 25;
+const DAY_MS = 86_400_000;
 
 const PROTOCOL_TABS: { value: ProtocolFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -29,841 +34,604 @@ const PROTOCOL_TABS: { value: ProtocolFilter; label: string }[] = [
   { value: "icp", label: "ICP" },
 ];
 
-const TIMEFRAMES: Timeframe[] = ["1D", "7D", "30D"];
-
-// Premium DeFi chart colors: electric blue, neon green, purple, amber, coral
-// Protocol-consistent color mapping
-const PROTOCOL_LINE_COLORS: Record<string, string> = {
-  uniswap: "#00A3FF", // electric blue
-  pancakeswap: "#ffa500", // amber
-  raydium: "#00FF88", // neon green
-  icp: "#9945FF", // violet
-  icpswap: "#9945FF", // violet
-  kongswap: "#cc44ff", // purple-violet
-};
-
-// Fallback palette when protocol unknown
 const LINE_COLORS = [
-  "#00A3FF", // electric blue
-  "#00FF88", // neon green
-  "#9945FF", // purple
-  "#ffa500", // amber
-  "#ff4466", // coral/red
+  "oklch(var(--chart-1))",
+  "oklch(var(--chart-2))",
+  "oklch(var(--chart-5))",
+  "oklch(var(--chart-4))",
+  "oklch(var(--chart-3))",
 ];
 
-function formatAPY(v: number) {
-  return `${v.toFixed(2)}%`;
+const fmtApy = (v: number) => `${v.toFixed(2)}%`;
+const AXIS_TICK = {
+  fill: "oklch(var(--muted-foreground))",
+  fontSize: 10,
+  fontFamily: "var(--font-mono)",
+};
+
+interface RangeStats {
+  start: number;
+  end: number;
+  change: number;
+  avg: number;
+  days: number;
 }
 
-function buildChartData(
-  pools: Pool[],
-  timeframe: Timeframe,
-): Record<string, number | string>[] {
-  if (timeframe === "1D") {
-    const hours = Array.from({ length: 24 }, (_, i) => {
-      const h = i.toString().padStart(2, "0");
-      const point: Record<string, number | string> = { time: `${h}:00` };
-      for (const pool of pools) {
-        const noise =
-          Math.sin(i * 0.5 + pool.apy.current) * pool.apy.current * 0.04;
-        point[pool.id] = Math.max(
-          0.1,
-          Number((pool.apy.current + noise).toFixed(2)),
-        );
-      }
-      return point;
-    });
-    return hours;
-  }
-
-  if (timeframe === "7D") {
-    const allDates = pools[0]?.apyTrend.day7.map((d) => d.date) ?? [];
-    return allDates.map((date) => {
-      const point: Record<string, number | string> = { time: date.slice(5) };
-      for (const pool of pools) {
-        const entry = pool.apyTrend.day7.find((d) => d.date === date);
-        point[pool.id] = entry?.apy ?? pool.apy.day7Avg;
-      }
-      return point;
-    });
-  }
-
-  // 30D
-  const allDates = pools[0]?.apyTrend.day30.map((d) => d.date) ?? [];
-  return allDates.map((date, idx) => {
-    const point: Record<string, number | string> = {
-      time: idx % 5 === 0 ? date.slice(5) : "",
-    };
-    for (const pool of pools) {
-      const entry = pool.apyTrend.day30.find((d) => d.date === date);
-      point[pool.id] = entry?.apy ?? pool.apy.day30Avg;
-    }
-    return point;
-  });
+function sliceRange(
+  series: PoolHistoryPoint[],
+  cutoff: number,
+): PoolHistoryPoint[] {
+  return series.filter((p) => p.timestamp >= cutoff);
 }
 
-interface CustomTooltipProps {
-  active?: boolean;
-  payload?: Array<{ name: string; value: number; color: string }>;
-  label?: string;
-  poolMap: Record<string, Pool>;
+function computeStats(points: PoolHistoryPoint[]): RangeStats | null {
+  if (points.length < 2) return null;
+  const start = points[0].apy;
+  const end = points[points.length - 1].apy;
+  const avg = points.reduce((sum, p) => sum + p.apy, 0) / points.length;
+  return { start, end, change: end - start, avg, days: points.length };
 }
 
-function CustomTooltip({
-  active,
-  payload,
-  label,
-  poolMap,
-  timeframe,
-}: CustomTooltipProps & {
-  chartData?: Record<string, number | string>[];
-  timeframe: Timeframe;
-}) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div
-      className="rounded-lg p-3 min-w-[200px]"
-      style={{
-        background: "rgba(0,0,0,0.82)",
-        border: "1px solid rgba(0,163,255,0.3)",
-        backdropFilter: "blur(12px)",
-        boxShadow: "0 0 20px rgba(0,163,255,0.15), 0 8px 24px rgba(0,0,0,0.5)",
-      }}
-    >
-      <p
-        className="text-xs mb-2 font-mono uppercase tracking-widest"
-        style={{ color: "#909090" }}
-      >
-        {label} · {timeframe}
-      </p>
-      {payload.map((entry) => {
-        const pool = poolMap[entry.name];
-        return (
-          <div
-            key={entry.name}
-            className="flex items-center justify-between gap-4 text-xs py-0.5"
-          >
-            <div className="flex flex-col gap-0.5">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className="w-2 h-2 rounded-full flex-shrink-0"
-                  style={{
-                    background: entry.color,
-                    boxShadow: `0 0 6px ${entry.color}99`,
-                  }}
-                />
-                <span
-                  className="truncate max-w-[120px] font-medium"
-                  style={{ color: "#e0e0e0" }}
-                >
-                  {pool?.name ?? entry.name}
-                </span>
-              </div>
-              {pool && (
-                <span
-                  className="text-[10px] pl-3.5 uppercase tracking-widest"
-                  style={{ color: "#606060" }}
-                >
-                  {pool.protocol}
-                </span>
-              )}
-            </div>
-            <span
-              className="font-mono font-semibold text-right"
-              style={{
-                color: entry.color,
-                textShadow: `0 0 8px ${entry.color}99`,
-              }}
-            >
-              {formatAPY(entry.value)}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function ChangeCell({ value }: { value: number }) {
-  const positive = value >= 0;
+function ChangeValue({ value }: { value: number }) {
+  const flat = Math.abs(value) < 0.005;
+  const Icon = flat ? Minus : value > 0 ? ArrowUpRight : ArrowDownRight;
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-0.5 font-mono text-xs font-semibold",
+        "inline-flex items-center gap-0.5 font-mono text-xs font-semibold tabular-nums",
+        flat
+          ? "text-muted-foreground"
+          : value > 0
+            ? "text-success"
+            : "text-destructive",
       )}
-      style={{
-        color: positive ? "#00FF88" : "#ff4466",
-        textShadow: positive
-          ? "0 0 8px rgba(0,255,136,0.5)"
-          : "0 0 8px rgba(255,68,102,0.5)",
-      }}
     >
-      {positive ? (
-        <svg
-          className="w-3 h-3"
-          viewBox="0 0 12 12"
-          fill="none"
-          role="img"
-          aria-label="up"
-        >
-          <path d="M6 2l4 6H2l4-6z" fill="currentColor" />
-        </svg>
-      ) : (
-        <svg
-          className="w-3 h-3"
-          viewBox="0 0 12 12"
-          fill="none"
-          role="img"
-          aria-label="down"
-        >
-          <path d="M6 10L2 4h8l-4 6z" fill="currentColor" />
-        </svg>
-      )}
-      {Math.abs(value).toFixed(2)}%
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+      {value > 0 ? "+" : value < 0 ? "-" : ""}
+      {Math.abs(value).toFixed(2)} pp
     </span>
   );
 }
 
-function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
-  useEffect(() => {
-    const handler = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
-  }, []);
-  return isMobile;
+interface TooltipEntry {
+  dataKey?: string | number;
+  value?: number;
+  color?: string;
 }
 
+function ChartTooltip({
+  active,
+  payload,
+  label,
+  names,
+}: {
+  active?: boolean;
+  payload?: TooltipEntry[];
+  label?: string;
+  names: Record<string, string>;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="min-w-[180px] rounded-md border border-border bg-popover p-3 shadow-elevated">
+      <p className="mb-2 font-mono text-xs uppercase tracking-widest text-muted-foreground">
+        {label}
+      </p>
+      {payload.map((entry) => (
+        <div
+          key={String(entry.dataKey)}
+          className="flex items-center justify-between gap-4 py-0.5 text-xs"
+        >
+          <span className="flex min-w-0 items-center gap-1.5 text-foreground">
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ background: entry.color }}
+            />
+            <span className="truncate">
+              {names[String(entry.dataKey)] ?? entry.dataKey}
+            </span>
+          </span>
+          <span className="font-mono font-semibold tabular-nums text-foreground">
+            {typeof entry.value === "number" ? fmtApy(entry.value) : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const panel = "rounded-lg border border-border bg-card";
+const segmentBtn =
+  "min-h-[32px] rounded px-3 font-mono text-xs font-semibold uppercase tracking-wider transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
 export function APYTrackerPage() {
+  const pools = usePools();
   const [protocol, setProtocol] = useState<ProtocolFilter>("all");
-  const [timeframe, setTimeframe] = useState<Timeframe>("7D");
-  const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(
-    new Set(),
-  );
-  const [isLoading, setIsLoading] = useState(true);
-  const [lastUpdated] = useState<Date>(() => new Date());
-  const isMobile = useIsMobile();
+  const [range, setRange] = useState<RangeDays>(30);
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
-  // Simulate async fetch
-  useEffect(() => {
-    const timer = setTimeout(() => setIsLoading(false), 900);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const filteredPools = useMemo(
-    () =>
+  const filtered = useMemo(() => {
+    const list =
       protocol === "all"
-        ? MOCK_POOLS
-        : MOCK_POOLS.filter((p) => p.protocol === protocol),
-    [protocol],
+        ? pools.data
+        : pools.data.filter((p) => p.protocol === protocol);
+    return [...list].sort((a, b) => b.apy.current - a.apy.current);
+  }, [pools.data, protocol]);
+
+  const selectedIds = useMemo(() => {
+    const valid = (picked ?? []).filter((id) =>
+      filtered.some((p) => p.id === id),
+    );
+    if (picked !== null && valid.length > 0) return valid;
+    return filtered.slice(0, MAX_SELECTED).map((p) => p.id);
+  }, [picked, filtered]);
+
+  const selectedPools = useMemo(
+    () =>
+      selectedIds
+        .map((id) => filtered.find((p) => p.id === id))
+        .filter((p): p is Pool => p !== undefined),
+    [selectedIds, filtered],
   );
 
-  // Default: top 5 by current APY when filter changes
-  useEffect(() => {
-    const top5 = [...filteredPools]
-      .sort((a, b) => b.apy.current - a.apy.current)
-      .slice(0, 5)
-      .map((p) => p.id);
-    setSelectedPoolIds(new Set(top5));
-  }, [filteredPools]);
+  const poolKey = (i: number) => {
+    const p = selectedPools[i];
+    return p ? (p.poolId ?? p.id) : undefined;
+  };
+  const histories = [
+    usePoolHistory(poolKey(0)),
+    usePoolHistory(poolKey(1)),
+    usePoolHistory(poolKey(2)),
+    usePoolHistory(poolKey(3)),
+    usePoolHistory(poolKey(4)),
+  ].slice(0, selectedPools.length);
 
-  const chartPools = useMemo(
-    () => filteredPools.filter((p) => selectedPoolIds.has(p.id)).slice(0, 5),
-    [filteredPools, selectedPoolIds],
+  const latest = Math.max(
+    0,
+    ...histories.map((h) => h.data[h.data.length - 1]?.timestamp ?? 0),
   );
+  const cutoff = latest - range * DAY_MS;
+  const ranged = selectedPools.map((pool, i) => ({
+    pool,
+    points: sliceRange(histories[i].data, cutoff),
+  }));
 
-  const chartData = useMemo(
-    () => (chartPools.length ? buildChartData(chartPools, timeframe) : []),
-    [chartPools, timeframe],
-  );
-
-  const poolMap = useMemo(
-    () => Object.fromEntries(MOCK_POOLS.map((p) => [p.id, p])),
-    [],
-  );
-
-  const togglePool = useCallback((id: string) => {
-    setSelectedPoolIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        if (next.size > 1) next.delete(id);
-      } else {
-        if (next.size < 5) next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const sortedTablePools = useMemo(
-    () => [...filteredPools].sort((a, b) => b.apy.current - a.apy.current),
-    [filteredPools],
-  );
-
-  // Compute per-pool APY change over selected timeframe
-  const poolTimeframeChange = useMemo(() => {
-    const result: Record<string, number> = {};
-    for (const pool of chartPools) {
-      if (timeframe === "1D") {
-        result[pool.id] = pool.apy.day1Change;
-      } else if (timeframe === "7D") {
-        const data = pool.apyTrend.day7;
-        if (data.length >= 2) {
-          result[pool.id] = data[data.length - 1].apy - data[0].apy;
-        } else {
-          result[pool.id] = 0;
-        }
-      } else {
-        const data = pool.apyTrend.day30;
-        if (data.length >= 2) {
-          result[pool.id] = data[data.length - 1].apy - data[0].apy;
-        } else {
-          result[pool.id] = 0;
-        }
-      }
+  const byDate = new Map<string, Record<string, number | string>>();
+  const statsById = new Map<string, RangeStats>();
+  for (const { pool, points } of ranged) {
+    for (const p of points) {
+      const row = byDate.get(p.date) ?? { date: p.date };
+      row[pool.id] = Number(p.apy.toFixed(2));
+      byDate.set(p.date, row);
     }
-    return result;
-  }, [chartPools, timeframe]);
+    const s = computeStats(points);
+    if (s) statsById.set(pool.id, s);
+  }
+  const chartData = [...byDate.values()].sort((a, b) =>
+    String(a.date).localeCompare(String(b.date)),
+  );
 
-  // Protocol-aware color assignment
-  const getPoolColor = useCallback((pool: Pool, idx: number): string => {
-    const protocolColor = PROTOCOL_LINE_COLORS[pool.protocol];
-    if (protocolColor) return protocolColor;
-    return LINE_COLORS[idx] ?? "#00A3FF";
-  }, []);
+  const names = useMemo(
+    () => Object.fromEntries(selectedPools.map((p) => [p.id, p.name])),
+    [selectedPools],
+  );
+
+  const historyLoading = histories.some((h) => h.isLoading);
+  const historyFailed = histories.filter(
+    (h) => h.isError && h.data.length === 0,
+  );
+  const historyDemo = histories.some((h) => h.isDemo && h.data.length > 0);
+  const showDemo = pools.isDemo || historyDemo;
+  const availableDays = Math.max(0, ...ranged.map((r) => r.points.length));
+
+  const retryHistory = () => {
+    for (const h of historyFailed) h.refetch();
+  };
+
+  const toggle = (id: string) => {
+    const base = selectedIds;
+    if (base.includes(id)) {
+      if (base.length > 1) setPicked(base.filter((x) => x !== id));
+    } else if (base.length < MAX_SELECTED) {
+      setPicked([...base, id]);
+    }
+  };
+
+  const chooseProtocol = (value: ProtocolFilter) => {
+    setProtocol(value);
+    setPicked(null);
+    setShowAll(false);
+  };
+
+  const colorOf = (id: string) => {
+    const idx = selectedIds.indexOf(id);
+    return idx >= 0 ? LINE_COLORS[idx] : undefined;
+  };
+
+  const tablePools = showAll ? filtered : filtered.slice(0, TABLE_PAGE);
 
   return (
-    <div
-      className="space-y-6 p-4 sm:p-6"
-      style={{ background: "#0D0D0D", minHeight: "100%" }}
-    >
-      {/* Breadcrumb */}
-      <Breadcrumb
-        items={[{ label: "Home", href: "/" }, { label: "APY Tracker" }]}
-      />
-
-      {/* Header */}
-      <div className="pb-2">
-        <div className="flex items-center gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <h1
-                className="text-2xl font-display font-bold tracking-widest uppercase"
-                style={{ color: "#e0e0e0" }}
-              >
-                APY{" "}
-                <span
-                  style={{
-                    color: "#00A3FF",
-                    textShadow: "0 0 16px rgba(0,163,255,0.5)",
-                  }}
-                >
-                  Tracker
-                </span>
-              </h1>
-              <HelpIcon term="APY" />
-            </div>
-            <div
-              className="mt-1 h-0.5 w-24 rounded-full"
-              style={{
-                background:
-                  "linear-gradient(90deg, #00A3FF 0%, transparent 100%)",
-                boxShadow: "0 0 8px rgba(0,163,255,0.6)",
-              }}
-            />
-          </div>
+    <div data-ocid="apy.page" className="space-y-6 p-4 sm:p-6">
+      <header className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="font-display text-2xl font-bold uppercase tracking-widest text-foreground">
+            APY <span className="text-primary">Tracker</span>
+          </h1>
+          {showDemo && <DemoBadge />}
         </div>
-        <p className="text-sm mt-2 tracking-wide" style={{ color: "#909090" }}>
-          Monitor annualized yield performance across protocols and timeframes
+        <p className="text-sm tracking-wide text-muted-foreground">
+          Yield history from DefiLlama for the pools you select, over 7, 30 or
+          90 days.
         </p>
-        <div className="mt-2">
-          <DataSourceBadge
-            source="Mock"
-            lastUpdated={lastUpdated}
-            status="demo"
-          />
-        </div>
-      </div>
+      </header>
 
-      {/* Protocol filter tabs */}
       <div
         data-ocid="apy.protocol_filter"
-        className="flex flex-wrap items-center gap-1 p-1 rounded-lg w-fit"
-        style={{
-          background: "rgba(13,13,13,0.8)",
-          border: "1px solid rgba(0,163,255,0.15)",
-          backdropFilter: "blur(8px)",
-        }}
+        className="flex w-fit flex-wrap items-center gap-1 rounded-lg border border-border bg-card p-1"
       >
         {PROTOCOL_TABS.map(({ value, label }) => (
           <button
             key={value}
             type="button"
             data-ocid={`apy.protocol_tab.${value}`}
-            onClick={() => setProtocol(value)}
-            className="px-3.5 py-1.5 rounded-md text-xs font-medium transition-smooth uppercase tracking-wider"
-            style={{
-              background:
-                protocol === value ? "rgba(0,163,255,0.15)" : "transparent",
-              color: protocol === value ? "#00A3FF" : "#909090",
-              border:
-                protocol === value
-                  ? "1px solid rgba(0,163,255,0.4)"
-                  : "1px solid transparent",
-              boxShadow:
-                protocol === value
-                  ? "0 0 12px rgba(0,163,255,0.2), inset 0 0 8px rgba(0,163,255,0.05)"
-                  : "none",
-            }}
+            aria-pressed={protocol === value}
+            onClick={() => chooseProtocol(value)}
+            className={cn(
+              segmentBtn,
+              "font-body tracking-wider",
+              protocol === value
+                ? "bg-primary/15 text-primary ring-1 ring-primary/40"
+                : "text-muted-foreground hover:text-foreground",
+            )}
           >
             {label}
           </button>
         ))}
       </div>
 
-      {/* Chart card */}
-      <div
-        className="rounded-xl"
-        style={{
-          background: "rgba(13,13,13,0.85)",
-          border: "1px solid rgba(0,163,255,0.2)",
-          backdropFilter: "blur(10px)",
-          boxShadow:
-            "0 0 30px rgba(0,163,255,0.08), 0 8px 32px rgba(0,0,0,0.4)",
-        }}
-      >
-        {/* Chart header: title + timeframe toggle */}
-        <div
-          className="flex items-center justify-between px-5 pt-4 pb-3"
-          style={{ borderBottom: "1px solid rgba(0,163,255,0.12)" }}
-        >
-          <div>
-            <h2
-              className="text-sm font-semibold uppercase tracking-widest"
-              style={{ color: "#e0e0e0" }}
-            >
-              APY TREND &mdash;{" "}
-              <span style={{ color: "#00A3FF" }}>
-                {protocol === "all"
-                  ? "All Protocols"
-                  : PROTOCOL_METADATA[protocol]?.name}
-              </span>
-            </h2>
-            <p
-              className="text-xs mt-0.5 tracking-wide"
-              style={{ color: "#909090" }}
-            >
-              Showing top 5 selected pools
-            </p>
-          </div>
-          <div
-            data-ocid="apy.timeframe_toggle"
-            className="flex items-center gap-1 rounded-md p-0.5"
-            style={{
-              background: "rgba(13,13,13,0.9)",
-              border: "1px solid rgba(0,163,255,0.15)",
-            }}
-          >
-            {TIMEFRAMES.map((tf) => (
-              <button
-                key={tf}
-                type="button"
-                data-ocid={`apy.timeframe.${tf}`}
-                onClick={() => setTimeframe(tf)}
-                className="px-3 min-h-[36px] rounded text-xs font-mono font-semibold transition-smooth tracking-widest"
-                style={{
-                  background:
-                    timeframe === tf ? "rgba(0,163,255,0.2)" : "transparent",
-                  color: timeframe === tf ? "#00A3FF" : "#909090",
-                  border:
-                    timeframe === tf
-                      ? "1px solid rgba(0,163,255,0.5)"
-                      : "1px solid transparent",
-                  boxShadow:
-                    timeframe === tf ? "0 0 10px rgba(0,163,255,0.25)" : "none",
-                }}
-              >
-                {tf}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Pool selector checklist */}
-        <div
-          className="px-4 pt-3 pb-2 flex flex-wrap gap-2 max-h-[160px] overflow-y-auto"
-          style={{ borderBottom: "1px solid rgba(0,163,255,0.08)" }}
-        >
-          {filteredPools.map((pool) => {
-            const selected = selectedPoolIds.has(pool.id);
-            const colorIdx = chartPools.findIndex((p) => p.id === pool.id);
-            const lineColor =
-              colorIdx >= 0 ? getPoolColor(pool, colorIdx) : undefined;
-            return (
-              <button
-                key={pool.id}
-                type="button"
-                data-ocid={`apy.pool_toggle.${pool.id}`}
-                onClick={() => togglePool(pool.id)}
-                className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium transition-smooth"
-                style={{
-                  background: selected
-                    ? lineColor
-                      ? `${lineColor}18`
-                      : "rgba(0,163,255,0.12)"
-                    : "rgba(13,13,13,0.6)",
-                  border: selected
-                    ? `1px solid ${lineColor ?? "#00A3FF"}55`
-                    : "1px solid rgba(255,255,255,0.06)",
-                  color: selected ? (lineColor ?? "#00A3FF") : "#909090",
-                  boxShadow:
-                    selected && lineColor ? `0 0 8px ${lineColor}25` : "none",
-                }}
-              >
-                <span
-                  className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                  style={{
-                    background:
-                      selected && lineColor
-                        ? lineColor
-                        : "rgba(255,255,255,0.12)",
-                    boxShadow:
-                      selected && lineColor ? `0 0 6px ${lineColor}99` : "none",
-                  }}
-                />
-                <span>{pool.name}</span>
-                <span className="font-mono" style={{ opacity: 0.7 }}>
-                  {pool.apy.current.toFixed(1)}%
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Chart */}
-        <div className="px-2 pt-4 pb-4" data-ocid="apy.chart">
-          {isLoading ? (
-            <SkeletonChart />
-          ) : chartPools.length === 0 ? (
-            <div
-              data-ocid="apy.chart.empty_state"
-              className="flex flex-col items-center justify-center h-[220px] gap-3 text-center px-4"
-            >
-              <svg
-                className="w-12 h-12"
-                style={{ color: "rgba(0,163,255,0.25)" }}
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.5}
-                aria-hidden="true"
-              >
-                <path
-                  d="M3 3v18h18"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M7 16l4-5 4 3 4-6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <p
-                className="text-sm font-semibold tracking-widest uppercase"
-                style={{ color: "#e0e0e0" }}
-              >
-                Select pools to compare APY trends
-              </p>
-              <p
-                className="text-xs max-w-xs"
-                style={{ color: "rgba(144,144,144,0.7)" }}
-              >
-                Choose up to 5 pools from the list above to visualize their APY
-                performance over time.
-              </p>
-              <a
-                href="/pools"
-                data-ocid="apy.empty_state.browse_pools_link"
-                className="mt-1 inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold uppercase tracking-widest transition-smooth"
-                style={{
-                  background: "rgba(0,163,255,0.1)",
-                  border: "1px solid rgba(0,163,255,0.35)",
-                  color: "#00A3FF",
-                  boxShadow: "0 0 12px rgba(0,163,255,0.12)",
-                }}
-              >
-                Browse Pools
-              </a>
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={isMobile ? 220 : 320}>
-              <LineChart
-                data={chartData}
-                margin={{ top: 8, right: 24, left: 0, bottom: 0 }}
-              >
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="rgba(0,163,255,0.08)"
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="time"
-                  tick={{
-                    fill: "#606060",
-                    fontSize: 10,
-                    fontFamily: "var(--font-mono)",
-                  }}
-                  axisLine={false}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                />
-                <YAxis
-                  tick={{
-                    fill: "#606060",
-                    fontSize: 10,
-                    fontFamily: "var(--font-mono)",
-                  }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v: number) => `${v}%`}
-                  width={48}
-                />
-                <Tooltip
-                  content={
-                    <CustomTooltip
-                      poolMap={poolMap}
-                      chartData={chartData}
-                      timeframe={timeframe}
-                    />
-                  }
-                  cursor={{ stroke: "rgba(0,163,255,0.25)", strokeWidth: 1 }}
-                />
-                <Legend
-                  formatter={(value: string) => {
-                    const pool = poolMap[value];
-                    const poolIdx = chartPools.findIndex((p) => p.id === value);
-                    const change = poolTimeframeChange[value] ?? 0;
-                    const changeSign = change >= 0 ? "+" : "";
-                    return (
-                      <span
-                        style={{
-                          color: "#909090",
-                          fontSize: 10,
-                          fontFamily: "var(--font-mono)",
-                          letterSpacing: "0.05em",
-                          textTransform: "uppercase",
-                        }}
-                      >
-                        {pool?.name ?? value}
-                        {poolIdx >= 0 && (
-                          <span
-                            style={{
-                              marginLeft: 4,
-                              color: change >= 0 ? "#00FF88" : "#ff4466",
-                              textShadow:
-                                change >= 0
-                                  ? "0 0 6px rgba(0,255,136,0.5)"
-                                  : "0 0 6px rgba(255,68,102,0.5)",
-                            }}
-                          >
-                            {change >= 0 ? "↑" : "↓"}
-                            {changeSign}
-                            {Math.abs(change).toFixed(2)}% ({timeframe})
-                          </span>
-                        )}
-                      </span>
-                    );
-                  }}
-                  iconType="circle"
-                  iconSize={7}
-                  wrapperStyle={{ paddingTop: 12 }}
-                />
-                {chartPools.map((pool, idx) => {
-                  const color = getPoolColor(pool, idx);
-                  return (
-                    <Line
-                      key={pool.id}
-                      type="monotone"
-                      dataKey={pool.id}
-                      stroke={color}
-                      strokeWidth={idx === 0 ? 2.5 : 2}
-                      dot={false}
-                      isAnimationActive={true}
-                      animationDuration={800}
-                      activeDot={{
-                        r: 5,
-                        strokeWidth: 0,
-                        fill: color,
-                        style: { filter: `drop-shadow(0 0 6px ${color})` },
-                      }}
-                      style={{ filter: `drop-shadow(0 0 3px ${color}66)` }}
-                    />
-                  );
-                })}
-              </LineChart>
-            </ResponsiveContainer>
+      {pools.isLoading ? (
+        <LoadingState label="Loading pools from DefiLlama…" />
+      ) : (
+        <>
+          {pools.isError && (
+            <ErrorState
+              title={
+                pools.isDemo
+                  ? "Live pool data is unavailable"
+                  : "Could not refresh pool data"
+              }
+              message={
+                pools.isDemo
+                  ? "Showing labelled demo pools instead. Retry to load live data."
+                  : "Showing the last loaded data. Retry to refresh."
+              }
+              onRetry={pools.refetch}
+            />
           )}
-        </div>
-      </div>
 
-      {/* Stats table */}
-      <div
-        className="rounded-xl overflow-hidden"
-        style={{
-          background: "rgba(13,13,13,0.85)",
-          border: "1px solid rgba(0,163,255,0.15)",
-          backdropFilter: "blur(10px)",
-          boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
-        }}
-      >
-        <div
-          className="px-5 py-4"
-          style={{ borderBottom: "1px solid rgba(0,163,255,0.12)" }}
-        >
-          <h2
-            className="text-sm font-semibold uppercase tracking-widest"
-            style={{ color: "#e0e0e0" }}
-          >
-            APY Stats
-          </h2>
-          <p
-            className="text-xs mt-0.5 tracking-wide"
-            style={{ color: "#909090" }}
-          >
-            {filteredPools.length} pools sorted by current APY
-          </p>
-        </div>
+          {filtered.length === 0 ? (
+            <EmptyState
+              title="No pools for this protocol"
+              description="Try another protocol filter to see APY history."
+              action={
+                protocol !== "all" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    data-ocid="apy.clear_filter_button"
+                    onClick={() => chooseProtocol("all")}
+                  >
+                    Show all protocols
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <>
+              <section className={panel} data-ocid="apy.chart_panel">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
+                  <div>
+                    <h2 className="text-sm font-semibold uppercase tracking-widest text-foreground">
+                      APY trend
+                    </h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Up to {MAX_SELECTED} pools · {availableDays} daily points
+                      in range
+                    </p>
+                  </div>
+                  <div
+                    data-ocid="apy.range_toggle"
+                    className="flex items-center gap-1 rounded-md border border-border bg-background p-0.5"
+                  >
+                    {RANGES.map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        data-ocid={`apy.range.${d}`}
+                        aria-pressed={range === d}
+                        onClick={() => setRange(d)}
+                        className={cn(
+                          segmentBtn,
+                          range === d
+                            ? "bg-primary/20 text-primary ring-1 ring-primary/50"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {d}D
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-        {isLoading ? (
-          <div className="p-4">
-            <SkeletonTable rows={6} />
-          </div>
-        ) : (
-          <div className="overflow-x-auto" data-ocid="apy.stats_table">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ borderBottom: "1px solid rgba(0,163,255,0.1)" }}>
-                  {[
-                    "Pool",
-                    "Protocol",
-                    "Current APY",
-                    "1D Change",
-                    "7D Avg",
-                    "30D Avg",
-                  ].map((col) => (
-                    <th
-                      key={col}
-                      className={cn(
-                        "px-4 py-3 text-xs font-medium uppercase tracking-widest",
-                        col !== "Pool" && col !== "Protocol"
-                          ? "text-right"
-                          : "text-left",
-                      )}
-                      style={{ color: "#606060" }}
-                    >
-                      {col}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedTablePools.map((pool, idx) => {
-                  const isSelected = selectedPoolIds.has(pool.id);
-                  const colorIdx = chartPools.findIndex(
-                    (p) => p.id === pool.id,
-                  );
-                  const lineColor =
-                    colorIdx >= 0 ? getPoolColor(pool, colorIdx) : null;
-                  return (
-                    <tr
-                      key={pool.id}
-                      data-ocid={`apy.table_row.${idx + 1}`}
-                      className="transition-smooth"
-                      style={{
-                        borderBottom: "1px solid rgba(255,255,255,0.04)",
-                        background: isSelected
-                          ? "rgba(0,163,255,0.04)"
-                          : "transparent",
-                      }}
-                      onMouseEnter={(e) => {
-                        (
-                          e.currentTarget as HTMLTableRowElement
-                        ).style.background = "rgba(0,163,255,0.07)";
-                      }}
-                      onMouseLeave={(e) => {
-                        (
-                          e.currentTarget as HTMLTableRowElement
-                        ).style.background = isSelected
-                          ? "rgba(0,163,255,0.04)"
-                          : "transparent";
-                      }}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          {isSelected && lineColor && (
-                            <span
-                              className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{
-                                background: lineColor,
-                                boxShadow: `0 0 5px ${lineColor}99`,
-                              }}
+                <div className="flex max-h-[132px] flex-wrap gap-2 overflow-y-auto border-b border-border px-4 py-3">
+                  {filtered.slice(0, 16).map((pool) => {
+                    const on = selectedIds.includes(pool.id);
+                    const color = colorOf(pool.id);
+                    const locked = !on && selectedIds.length >= MAX_SELECTED;
+                    return (
+                      <button
+                        key={pool.id}
+                        type="button"
+                        data-ocid={`apy.pool_toggle.${pool.id}`}
+                        aria-pressed={on}
+                        disabled={locked}
+                        title={
+                          locked
+                            ? `Deselect a pool first (max ${MAX_SELECTED})`
+                            : undefined
+                        }
+                        onClick={() => toggle(pool.id)}
+                        className={cn(
+                          "inline-flex min-h-[28px] items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                          on
+                            ? "border-primary/40 bg-primary/10 text-foreground"
+                            : "border-border text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        <span
+                          className="h-2.5 w-2.5 shrink-0 rounded-full bg-muted"
+                          style={color ? { background: color } : undefined}
+                        />
+                        <span className="max-w-[140px] truncate">
+                          {pool.name}
+                        </span>
+                        <span className="font-mono text-muted-foreground">
+                          {pool.apy.current.toFixed(1)}%
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="px-2 py-4" data-ocid="apy.chart">
+                  {historyLoading && chartData.length === 0 ? (
+                    <LoadingState label="Loading pool history…" />
+                  ) : chartData.length === 0 && historyFailed.length > 0 ? (
+                    <ErrorState
+                      title="Could not load APY history"
+                      message="DefiLlama history is unreachable for the selected pools."
+                      onRetry={retryHistory}
+                    />
+                  ) : chartData.length === 0 ? (
+                    <EmptyState
+                      title="No history in this range"
+                      description="The selected pools have no APY history yet. Pick other pools or a longer range."
+                    />
+                  ) : (
+                    <>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <LineChart
+                          data={chartData}
+                          margin={{ top: 8, right: 24, left: 0, bottom: 0 }}
+                        >
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="oklch(var(--border))"
+                            vertical={false}
+                          />
+                          <XAxis
+                            dataKey="date"
+                            tick={AXIS_TICK}
+                            tickFormatter={(v: string) => v.slice(5)}
+                            axisLine={false}
+                            tickLine={false}
+                            minTickGap={32}
+                          />
+                          <YAxis
+                            tick={AXIS_TICK}
+                            axisLine={false}
+                            tickLine={false}
+                            tickFormatter={(v: number) => `${v}%`}
+                            width={52}
+                          />
+                          <Tooltip
+                            content={<ChartTooltip names={names} />}
+                            cursor={{ stroke: "oklch(var(--primary) / 0.3)" }}
+                          />
+                          {selectedPools.map((pool, idx) => (
+                            <Line
+                              key={pool.id}
+                              type="monotone"
+                              dataKey={pool.id}
+                              stroke={LINE_COLORS[idx]}
+                              strokeWidth={2}
+                              dot={false}
+                              connectNulls
+                              isAnimationActive={false}
                             />
-                          )}
-                          {(!isSelected || !lineColor) && (
-                            <span
-                              className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{ background: "rgba(255,255,255,0.1)" }}
-                            />
-                          )}
-                          <span
-                            className="font-medium tracking-wide"
-                            style={{ color: "#e0e0e0" }}
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
+                      {historyFailed.length > 0 && (
+                        <p
+                          data-ocid="apy.history_partial_error"
+                          className="mt-2 px-3 text-xs text-warning"
+                        >
+                          History failed for {historyFailed.length} selected
+                          pool{historyFailed.length > 1 ? "s" : ""}.{" "}
+                          <button
+                            type="button"
+                            data-ocid="apy.history_retry_button"
+                            onClick={retryHistory}
+                            className="underline underline-offset-2"
                           >
-                            {pool.name}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <ProtocolBadge protocol={pool.protocol} size="sm" />
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span
-                          className="font-mono font-semibold"
-                          style={{
-                            color: "#00A3FF",
-                            textShadow: "0 0 8px rgba(0,163,255,0.5)",
-                          }}
-                        >
-                          {formatAPY(pool.apy.current)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <ChangeCell value={pool.apy.day1Change} />
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span
-                          className="font-mono"
-                          style={{ color: "#909090" }}
-                        >
-                          {formatAPY(pool.apy.day7Avg)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span
-                          className="font-mono"
-                          style={{ color: "#909090" }}
-                        >
-                          {formatAPY(pool.apy.day30Avg)}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+                            Retry
+                          </button>
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              </section>
+
+              <section
+                className={cn(panel, "overflow-hidden")}
+                data-ocid="apy.stats_panel"
+              >
+                <div className="border-b border-border px-5 py-4">
+                  <h2 className="text-sm font-semibold uppercase tracking-widest text-foreground">
+                    APY stats
+                  </h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {filtered.length} pools by current APY · change and average
+                    cover the last {range} days of the selected pools
+                  </p>
+                </div>
+                <div className="overflow-x-auto" data-ocid="apy.stats_table">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-card">
+                      <tr className="border-b border-border text-xs uppercase tracking-widest text-muted-foreground">
+                        <th className="w-10 px-4 py-3 text-left font-medium">
+                          <span className="sr-only">Chart</span>
+                        </th>
+                        <th className="px-4 py-3 text-left font-medium">
+                          Pool
+                        </th>
+                        <th className="px-4 py-3 text-left font-medium">
+                          Protocol
+                        </th>
+                        <th className="px-4 py-3 text-left font-medium">
+                          Risk
+                        </th>
+                        <th className="px-4 py-3 text-right font-medium">
+                          Current APY
+                        </th>
+                        <th className="px-4 py-3 text-right font-medium">
+                          {range}D change
+                        </th>
+                        <th className="px-4 py-3 text-right font-medium">
+                          {range}D avg
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tablePools.map((pool, idx) => {
+                        const on = selectedIds.includes(pool.id);
+                        const stats = statsById.get(pool.id);
+                        const color = colorOf(pool.id);
+                        const locked =
+                          !on && selectedIds.length >= MAX_SELECTED;
+                        return (
+                          <tr
+                            key={pool.id}
+                            data-ocid={`apy.table_row.${idx + 1}`}
+                            className={cn(
+                              "border-b border-border/50 transition-smooth hover:bg-muted/40",
+                              on && "bg-primary/5",
+                            )}
+                          >
+                            <td className="px-4 py-2">
+                              <button
+                                type="button"
+                                data-ocid={`apy.row_toggle.${idx + 1}`}
+                                aria-pressed={on}
+                                aria-label={`${on ? "Remove" : "Add"} ${pool.name} ${on ? "from" : "to"} chart`}
+                                disabled={locked}
+                                onClick={() => toggle(pool.id)}
+                                className="flex h-6 w-6 items-center justify-center rounded border border-border text-primary-foreground transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+                                style={
+                                  color ? { background: color } : undefined
+                                }
+                              >
+                                {on && <Check className="h-3.5 w-3.5" />}
+                              </button>
+                            </td>
+                            <td className="px-4 py-2">
+                              <span className="block max-w-[200px] truncate font-medium text-foreground">
+                                {pool.name}
+                              </span>
+                              <span className="text-xs text-muted-foreground">
+                                {pool.chain}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2">
+                              <ProtocolBadge
+                                protocol={pool.protocol}
+                                size="sm"
+                              />
+                            </td>
+                            <td className="px-4 py-2">
+                              <RiskBadge
+                                pool={pool}
+                                history={
+                                  on
+                                    ? histories[selectedIds.indexOf(pool.id)]
+                                        ?.data
+                                    : undefined
+                                }
+                              />
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono font-semibold tabular-nums text-primary">
+                              {fmtApy(pool.apy.current)}
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              {stats ? (
+                                <ChangeValue value={stats.change} />
+                              ) : (
+                                <span
+                                  className="font-mono text-xs text-muted-foreground"
+                                  title={
+                                    on
+                                      ? "Not enough history in this range"
+                                      : "Add this pool to the chart to compute change"
+                                  }
+                                >
+                                  —
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                              {stats ? fmtApy(stats.avg) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {filtered.length > TABLE_PAGE && (
+                  <div className="flex justify-center border-t border-border p-3">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-ocid="apy.show_all_button"
+                      onClick={() => setShowAll((v) => !v)}
+                    >
+                      {showAll
+                        ? `Show top ${TABLE_PAGE}`
+                        : `Show all ${filtered.length} pools`}
+                    </Button>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
+
+export default APYTrackerPage;

@@ -49,6 +49,32 @@ export default {
           DEFAULT: "oklch(var(--card))",
           foreground: "oklch(var(--card-foreground))",
         },
+        success: {
+          DEFAULT: "oklch(var(--success) / <alpha-value>)",
+          foreground: "oklch(var(--success-foreground))",
+        },
+        warning: {
+          DEFAULT: "oklch(var(--warning) / <alpha-value>)",
+          foreground: "oklch(var(--warning-foreground))",
+        },
+        info: {
+          DEFAULT: "oklch(var(--info) / <alpha-value>)",
+          foreground: "oklch(var(--info-foreground))",
+        },
+        demo: {
+          DEFAULT: "oklch(var(--demo) / <alpha-value>)",
+          foreground: "oklch(var(--demo-foreground))",
+        },
+        risk: {
+          low: "oklch(var(--risk-low) / <alpha-value>)",
+          medium: "oklch(var(--risk-medium) / <alpha-value>)",
+          high: "oklch(var(--risk-high) / <alpha-value>)",
+        },
+        alert: {
+          triggered: "oklch(var(--alert-triggered) / <alpha-value>)",
+          enabled: "oklch(var(--alert-enabled) / <alpha-value>)",
+          disabled: "oklch(var(--alert-disabled) / <alpha-value>)",
+        },
         chart: {
           1: "oklch(var(--chart-1))",
           2: "oklch(var(--chart-2))",
@@ -82,6 +108,8 @@ export default {
         elevated: "0 12px 24px -4px rgba(0, 163, 255, 0.1), 0 8px 16px -2px rgba(0, 0, 0, 0.15)",
         card: "0 2px 4px 0 rgba(0,0,0,0.04), 0 1px 2px 0 rgba(0,0,0,0.02)",
         "glass-glow": "0 0 20px rgba(0, 163, 255, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.05)",
+        subtle: "0 1px 2px 0 rgba(0,0,0,0.3)",
+        popover: "0 16px 32px -8px rgba(0,0,0,0.6)",
       },
       keyframes: {
         "accordion-down": {
@@ -104,6 +132,17 @@ export default {
           "0%, 100%": { textShadow: "0 0 8px rgba(0, 255, 136, 0.6), 0 0 16px rgba(0, 255, 136, 0.3)" },
           "50%": { textShadow: "0 0 16px rgba(0, 255, 136, 0.8), 0 0 24px rgba(0, 255, 136, 0.5)" },
         },
+        shimmer: {
+          from: { backgroundPosition: "200% 0" },
+          to: { backgroundPosition: "-200% 0" },
+        },
+        "bell-ring": {
+          "0%, 100%": { transform: "rotate(0)" },
+          "20%": { transform: "rotate(14deg)" },
+          "40%": { transform: "rotate(-12deg)" },
+          "60%": { transform: "rotate(8deg)" },
+          "80%": { transform: "rotate(-4deg)" },
+        },
         "lift-scale": {
           "0%": { transform: "translateY(0) scale(1)" },
           "100%": { transform: "translateY(-2px) scale(1.02)" },
@@ -116,6 +155,8 @@ export default {
         "slide-in": "slide-in 0.3s ease-out",
         "glow-pulse": "glow-pulse 2s ease-in-out infinite",
         "lift-scale": "lift-scale 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        shimmer: "shimmer 1.6s linear infinite",
+        "bell-ring": "bell-ring 0.8s ease-in-out",
       },
     },
   },

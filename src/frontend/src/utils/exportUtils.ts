@@ -11,9 +11,13 @@ export function exportCSV(
   filename: string,
   headers: string[],
   rows: string[][],
-): void {
+): boolean {
   try {
-    const escapeCell = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const escapeCell = (v: string) => {
+      // Neutralise spreadsheet formulas in externally sourced text.
+      const safe = /^[=+@\t\r]|^-(?![\d.])/.test(v) ? `'${v}` : v;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
     const lines = [
       headers.map(escapeCell).join(","),
       ...rows.map((row) => row.map(escapeCell).join(",")),
@@ -25,11 +29,25 @@ export function exportCSV(
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
   } catch (err) {
     console.error("[exportCSV] Failed to export CSV:", err);
+    return false;
   }
+}
+
+/** Escapes text interpolated into the generated report HTML. */
+function esc(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // ─── PDF Generation via print window ─────────────────────────────────────────
@@ -43,6 +61,10 @@ export interface PDFReportOptions {
   title: string;
   date: string;
   walletAddress: string;
+  /** Line under the report logo. Defaults to the position report subtitle. */
+  subtitle?: string;
+  /** Label above `walletAddress`. Defaults to "Wallet Address:". */
+  metaLabel?: string;
   sections: PDFSection[];
   tableHeaders?: string[];
   tableRows?: string[][];
@@ -54,12 +76,12 @@ export interface PDFReportOptions {
  *
  * @param opts - Report configuration (title, date, wallet, sections, etc.).
  */
-export function exportPDF(opts: PDFReportOptions): void {
+export function exportPDF(opts: PDFReportOptions): boolean {
   const summaryHtml = opts.summary
     ? opts.summary
         .map(
           (s) =>
-            `<div class="summary-item"><span class="summary-label">${s.label}</span><span class="summary-value">${s.value}</span></div>`,
+            `<div class="summary-item"><span class="summary-label">${esc(s.label)}</span><span class="summary-value">${esc(s.value)}</span></div>`,
         )
         .join("")
     : "";
@@ -68,10 +90,10 @@ export function exportPDF(opts: PDFReportOptions): void {
     .map(
       (section) =>
         `<div class="section">
-          <h3 class="section-title">${section.title}</h3>
+          <h3 class="section-title">${esc(section.title)}</h3>
           <table class="data-table">
             <tbody>
-              ${section.rows.map((r) => `<tr><td class="dt-label">${r.label}</td><td class="dt-value">${r.value}</td></tr>`).join("")}
+              ${section.rows.map((r) => `<tr><td class="dt-label">${esc(r.label)}</td><td class="dt-value">${esc(r.value)}</td></tr>`).join("")}
             </tbody>
           </table>
         </div>`,
@@ -84,10 +106,10 @@ export function exportPDF(opts: PDFReportOptions): void {
           <h3 class="section-title">Data Table</h3>
           <table class="main-table">
             <thead>
-              <tr>${opts.tableHeaders.map((h) => `<th>${h}</th>`).join("")}</tr>
+              <tr>${opts.tableHeaders.map((h) => `<th>${esc(h)}</th>`).join("")}</tr>
             </thead>
             <tbody>
-              ${opts.tableRows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
+              ${opts.tableRows.map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join("")}</tr>`).join("")}
             </tbody>
           </table>
         </div>`
@@ -97,7 +119,7 @@ export function exportPDF(opts: PDFReportOptions): void {
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>${opts.title}</title>
+  <title>${esc(opts.title)}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     @page { size: A4; margin: 15mm 12mm; }
@@ -136,12 +158,12 @@ export function exportPDF(opts: PDFReportOptions): void {
     <div class="header">
       <div>
         <div class="logo">DeFi Pool <span>Analytics</span></div>
-        <div style="font-size: 10px; color: #64748b; margin-top: 3px;">Comprehensive Position Report</div>
+        <div style="font-size: 10px; color: #64748b; margin-top: 3px;">${esc(opts.subtitle ?? "Comprehensive Position Report")}</div>
       </div>
       <div class="meta">
-        <div class="date">${opts.date}</div>
-        <div>Wallet Address:</div>
-        <div class="wallet">${opts.walletAddress}</div>
+        <div class="date">${esc(opts.date)}</div>
+        <div>${esc(opts.metaLabel ?? "Wallet Address:")}</div>
+        <div class="wallet">${esc(opts.walletAddress)}</div>
       </div>
     </div>
 
@@ -149,7 +171,7 @@ export function exportPDF(opts: PDFReportOptions): void {
     ${sectionsHtml}
     ${tableHtml}
 
-    <div class="footer">Generated by DeFi Pool Analytics &bull; caffeine.ai &bull; ${opts.date}</div>
+    <div class="footer">Generated by DeFi Pool Analytics &bull; caffeine.ai &bull; ${esc(opts.date)}</div>
   </div>
 </body>
 </html>`;
@@ -160,7 +182,7 @@ export function exportPDF(opts: PDFReportOptions): void {
       console.warn(
         "[exportPDF] Popup was blocked — allow pop-ups for this site.",
       );
-      return;
+      return false;
     }
     win.document.write(html);
     win.document.close();
@@ -172,7 +194,9 @@ export function exportPDF(opts: PDFReportOptions): void {
         console.error("[exportPDF] window.print() failed:", printErr);
       }
     }, 600);
+    return true;
   } catch (err) {
     console.error("[exportPDF] Failed to open print window:", err);
+    return false;
   }
 }

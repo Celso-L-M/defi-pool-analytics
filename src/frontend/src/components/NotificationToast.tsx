@@ -212,7 +212,7 @@ export function NotificationToast({
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const prevAPYRef = useRef<Record<string, number>>({});
   const lastAITimestampRef = useRef<number>(0);
-  const reportedTVLRef = useRef<Set<string>>(new Set());
+  const idCounterRef = useRef(0);
 
   useEffect(() => {
     const history = safeReadLS<AIDecisionEntry[]>("aiDecisionHistory", []);
@@ -223,7 +223,8 @@ export function NotificationToast({
   }, []);
 
   const addNotif = useCallback((type: NotifType, message: string) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    idCounterRef.current += 1;
+    const id = `${Date.now()}-${idCounterRef.current}`;
     setNotifications((prev) => [
       ...prev,
       { id, type, message, timestamp: Date.now() },
@@ -259,24 +260,7 @@ export function NotificationToast({
       }
     }
 
-    // ── c) TVL DROP WARNING
-    const watchlist = safeReadLS<string[]>("watchlist", []);
-    for (const poolId of watchlist) {
-      if (reportedTVLRef.current.has(poolId)) continue;
-      const chance = Math.random();
-      if (chance < 0.25) {
-        const dropPct = (20 + Math.random() * 5).toFixed(1);
-        const matchedPos = positions.find((p) => p.position.poolId === poolId);
-        const poolName = matchedPos?.position.poolName ?? poolId;
-        addNotif(
-          "warning",
-          `${poolName} TVL dropped ${dropPct}% — review your position`,
-        );
-        reportedTVLRef.current.add(poolId);
-      }
-    }
-
-    // ── d) AI RECOMMENDATION
+    // ── c) AI RECOMMENDATION
     const history = safeReadLS<AIDecisionEntry[]>("aiDecisionHistory", []);
     if (history.length > 0) {
       const latest = history.reduce((a, b) =>

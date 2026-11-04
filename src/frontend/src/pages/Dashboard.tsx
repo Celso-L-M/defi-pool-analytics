@@ -1,27 +1,43 @@
-import { Breadcrumb } from "@/components/Breadcrumb";
-import { DataSourceBadge } from "@/components/DataSourceBadge";
-import { PercentChange } from "@/components/PercentChange";
+import { EmptyState, ErrorState, LoadingState } from "@/components/DataStates";
+import { DemoBadge } from "@/components/DemoBadge";
 import { ProtocolBadge } from "@/components/ProtocolBadge";
-import { MOCK_POOLS, MOCK_POSITIONS, PROTOCOL_METADATA } from "@/data/mockData";
+import { RiskBadge } from "@/components/RiskBadge";
+import { SignInPrompt } from "@/components/SignInPrompt";
+import { Button } from "@/components/ui/button";
+import { PROTOCOL_METADATA } from "@/data/mockData";
+import { useAuth } from "@/hooks/useAuth";
+import { usePoolHistory, usePools, useTokenPrices } from "@/hooks/useLiveData";
+import { usePositions } from "@/hooks/useQueries";
 import { cn } from "@/lib/utils";
-import type { Pool, Protocol } from "@/types/defi";
+import type { Pool } from "@/types/defi";
 import { toast } from "@/utils/toast";
 import { Link } from "@tanstack/react-router";
 import {
   Activity,
   ArrowUpRight,
   BarChart2,
+  Check,
+  ChevronDown,
+  Coins,
+  Copy,
   Droplets,
-  Flame,
+  HandCoins,
   LayoutDashboard,
-  Star,
+  RefreshCw,
   TrendingDown,
   TrendingUp,
   Trophy,
   Waves,
-  Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentType,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Area,
   AreaChart,
@@ -34,922 +50,789 @@ import {
   YAxis,
 } from "recharts";
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Constants and helpers ───────────────────────────────────────────────────
 
-const ELECTRIC_BLUE = "#00A3FF";
-const NEON_GREEN = "#00FF88";
-const DANGER_RED = "#FF4466";
-
-const PROTOCOL_COLORS: Record<Protocol, string> = {
-  uniswap: "#ec4899",
-  pancakeswap: "#f59e0b",
-  raydium: "#a855f7",
-  icp: ELECTRIC_BLUE,
+const PROTOCOL_STYLE: Record<string, { fill: string; bg: string }> = {
+  uniswap: { fill: "fill-chart-5", bg: "bg-chart-5" },
+  pancakeswap: { fill: "fill-chart-4", bg: "bg-chart-4" },
+  raydium: { fill: "fill-chart-3", bg: "bg-chart-3" },
+  icp: { fill: "fill-chart-1", bg: "bg-chart-1" },
 };
+const FALLBACK_STYLE = { fill: "fill-chart-2", bg: "bg-chart-2" };
 
-const GLASS_TOOLTIP_STYLE = {
-  background: "rgba(13,13,13,0.95)",
-  border: `1px solid ${ELECTRIC_BLUE}40`,
-  borderRadius: 10,
-  fontSize: 12,
-  color: "#e0e0e0",
-  backdropFilter: "blur(12px)",
-  boxShadow: `0 0 20px ${ELECTRIC_BLUE}20`,
-};
+const TICKERS = [
+  { id: "bitcoin", symbol: "BTC" },
+  { id: "ethereum", symbol: "ETH" },
+  { id: "solana", symbol: "SOL" },
+  { id: "binancecoin", symbol: "BNB" },
+  { id: "internet-computer", symbol: "ICP" },
+];
+const TICKER_IDS = TICKERS.map((t) => t.id);
 
-// Mock KPI change values — positive/negative per requirement
-const KPI_CHANGES = {
-  tvl: 2.3,
-  volume: -1.1,
-  fees: 4.2,
-  apy: 0.5,
-};
+const DONATION_ADDRESSES = [
+  {
+    network: "Ethereum",
+    symbol: "ETH",
+    address: "0xF9b0322aF671b9a0Df371dE59784602df3967628",
+    icon: "Ξ",
+  },
+  {
+    network: "Bitcoin",
+    symbol: "BTC",
+    address: "bc1qfmvw6eqh5tgs28qep786prr9gea7gxkhe4vhwt",
+    icon: "₿",
+  },
+  {
+    network: "Internet Computer",
+    symbol: "ICP",
+    address: "8048e0925e9d5b5c2a21379e4cc0d2a523f883429409318ece63ab913b46a33d",
+    icon: "∞",
+  },
+] as const;
 
-// Simulated last-updated timestamp ("just now" on load)
-const LAST_UPDATED = new Date(Date.now() - 45_000);
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const LABEL_CLASS =
+  "text-[10px] font-bold uppercase tracking-[2px] font-mono text-muted-foreground";
 
 function formatUSD(n: number): string {
   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
   return `$${n.toFixed(0)}`;
 }
 
-function useSimulatedLoading(delayMs = 900): boolean {
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const t = setTimeout(() => setLoading(false), delayMs);
-    return () => clearTimeout(t);
-  }, [delayMs]);
-  return loading;
+function formatPrice(n: number): string {
+  return n.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: n >= 100 ? 0 : 2,
+  });
 }
 
-// ─── Glass Card Primitive ────────────────────────────────────────────────────
+function signed(n: number, digits = 1): string {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
 
-function GlassCard({
+function trendClass(n: number): string {
+  return n >= 0 ? "text-accent" : "text-destructive";
+}
+
+/** Entry amount grown at the pool's current APY since the entry date. */
+function estimateValue(
+  amountUsd: number,
+  entryNs: bigint,
+  apy: number,
+): number {
+  const entryMs = Number(entryNs / 1_000_000n);
+  const years = Math.max(0, Date.now() - entryMs) / (365 * 86_400_000);
+  return amountUsd * (1 + (apy / 100) * years);
+}
+
+// ─── Shared building blocks ──────────────────────────────────────────────────
+
+function Panel({
   children,
   className,
   ocid,
-  hover = true,
-}: {
-  children: React.ReactNode;
-  className?: string;
-  ocid?: string;
-  hover?: boolean;
-}) {
+}: { children: ReactNode; className?: string; ocid?: string }) {
   return (
-    <div
+    <section
       data-ocid={ocid}
-      className={cn(
-        "rounded-xl overflow-hidden",
-        "border transition-all duration-300 ease-out",
-        hover && [
-          "hover:-translate-y-0.5 hover:scale-[1.01]",
-          "hover:border-[rgba(0,163,255,0.4)]",
-          "hover:shadow-[0_0_24px_rgba(0,163,255,0.12),0_8px_24px_-4px_rgba(0,0,0,0.3)]",
-        ],
-        className,
-      )}
-      style={{
-        background: "rgba(13,13,13,0.8)",
-        borderColor: "rgba(0,163,255,0.15)",
-        backdropFilter: "blur(10px)",
-        WebkitBackdropFilter: "blur(10px)",
-      }}
+      className={cn("glass-card rounded-xl overflow-hidden", className)}
     >
       {children}
-    </div>
+    </section>
   );
 }
-
-// ─── Section Heading ─────────────────────────────────────────────────────────
 
 function SectionHeading({
   icon: Icon,
   label,
-  iconColor,
+  badge,
+  action,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
+  icon: ComponentType<{ className?: string }>;
   label: string;
-  iconColor?: string;
+  badge?: ReactNode;
+  action?: ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 mb-1">
-      <span
-        style={{ color: iconColor ?? ELECTRIC_BLUE }}
-        className="flex-shrink-0 flex"
-      >
-        <Icon className="w-3.5 h-3.5" />
-      </span>
-      <span
-        className="text-[10px] font-bold uppercase tracking-[2px] font-mono"
-        style={{ color: "#909090" }}
-      >
-        {label}
-      </span>
-      <div
-        className="flex-1 h-px ml-1"
-        style={{
-          background: `linear-gradient(to right, ${iconColor ?? ELECTRIC_BLUE}40, transparent)`,
-        }}
-      />
+    <div className="flex flex-wrap items-center gap-2">
+      <Icon className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
+      <h2 className={LABEL_CLASS}>{label}</h2>
+      {badge}
+      <div className="ml-1 hidden h-px flex-1 bg-gradient-to-r from-primary/30 to-transparent sm:block" />
+      {action}
     </div>
   );
 }
 
-// ─── KPI Card ────────────────────────────────────────────────────────────────
+function ViewAllLink({ to, ocid }: { to: string; ocid: string }) {
+  return (
+    <Link
+      to={to}
+      data-ocid={ocid}
+      className="ml-auto flex items-center gap-0.5 font-mono text-xs text-primary transition-smooth hover:underline"
+    >
+      View all <ArrowUpRight className="h-3 w-3" />
+    </Link>
+  );
+}
+
+interface ChartTipProps {
+  active?: boolean;
+  payload?: ReadonlyArray<{ value?: number | string; name?: string | number }>;
+  label?: string | number;
+  seriesName: string;
+  format: (value: number) => string;
+}
+
+function ChartTip({
+  active,
+  payload,
+  label,
+  seriesName,
+  format,
+}: ChartTipProps) {
+  const item = payload?.[0];
+  if (!active || !item || typeof item.value !== "number") return null;
+  return (
+    <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-elevated">
+      {label !== undefined && (
+        <p className="mb-0.5 font-mono text-muted-foreground">{label}</p>
+      )}
+      <p className="font-mono font-semibold">
+        {item.name ?? seriesName}: {format(item.value)}
+      </p>
+    </div>
+  );
+}
 
 interface KPICardProps {
   label: string;
   value: string;
-  change: number;
-  icon: React.ComponentType<{ className?: string }>;
+  sub: ReactNode;
+  icon: ComponentType<{ className?: string }>;
   ocid: string;
-  glowColor?: "blue" | "green" | "neutral";
-  source:
-    | "ICPSwap"
-    | "KongSwap"
-    | "Uniswap"
-    | "PancakeSwap"
-    | "Raydium"
-    | "Binance"
-    | "Mock";
-  visible?: boolean;
+  tone: "primary" | "accent" | "neutral";
 }
 
-function KPICard({
-  label,
-  value,
-  change,
-  icon: Icon,
-  ocid,
-  glowColor = "neutral",
-  source,
-  visible,
-}: KPICardProps) {
-  const glowStyle =
-    glowColor === "green"
-      ? {
-          textShadow: `0 0 10px ${NEON_GREEN}99, 0 0 20px ${NEON_GREEN}55`,
-          color: NEON_GREEN,
-        }
-      : glowColor === "blue"
-        ? {
-            textShadow: `0 0 10px ${ELECTRIC_BLUE}99, 0 0 20px ${ELECTRIC_BLUE}55`,
-            color: ELECTRIC_BLUE,
-          }
-        : { color: "#e0e0e0" };
-
+function KPICard({ label, value, sub, icon: Icon, ocid, tone }: KPICardProps) {
   return (
-    <GlassCard ocid={ocid} hover>
+    <Panel ocid={ocid} className="card-hover">
       <div className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <p
-            className="text-[10px] font-bold uppercase tracking-[1.5px] font-mono"
-            style={{ color: "#909090" }}
-          >
-            {label}
-          </p>
-          <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center"
-            style={{
-              background: `${glowColor === "green" ? NEON_GREEN : ELECTRIC_BLUE}15`,
-              border: `1px solid ${glowColor === "green" ? NEON_GREEN : ELECTRIC_BLUE}30`,
-            }}
-          >
-            <span
-              style={{
-                color: glowColor === "green" ? NEON_GREEN : ELECTRIC_BLUE,
-              }}
-              className="flex"
-            >
-              <Icon className="w-3.5 h-3.5" />
-            </span>
-          </div>
+        <div className="mb-3 flex items-center justify-between">
+          <p className={LABEL_CLASS}>{label}</p>
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary">
+            <Icon className="h-3.5 w-3.5" />
+          </span>
         </div>
-
-        {/* Value with transition */}
         <p
           className={cn(
-            "font-mono text-3xl md:text-4xl font-bold tracking-tight transition-all duration-300",
-            visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1",
+            "font-mono text-2xl font-bold tracking-tight",
+            tone === "primary" && "primary-glow",
+            tone === "accent" && "accent-glow",
+            tone === "neutral" && "text-foreground",
           )}
-          style={glowStyle}
         >
           {value}
         </p>
-
-        {/* Percent change indicator */}
-        <div className="flex items-center gap-2 mt-1.5">
-          <PercentChange value={change} size="sm" />
-          <span className="text-xs" style={{ color: "#909090" }}>
-            vs yesterday
-          </span>
-        </div>
-
-        {/* Data source badge */}
-        <div
-          className="mt-2 pt-2"
-          style={{ borderTop: "1px solid rgba(0,163,255,0.08)" }}
-        >
-          <DataSourceBadge
-            source={source}
-            lastUpdated={LAST_UPDATED}
-            showTimestamp
-          />
-        </div>
+        <div className="mt-1.5 text-xs text-muted-foreground">{sub}</div>
       </div>
-    </GlassCard>
+    </Panel>
   );
 }
 
-// ─── Top Performer Feature Card ───────────────────────────────────────────────
+function KPISkeletons() {
+  return Array.from({ length: 4 }, (_, i) => `kpi-skeleton-${i}`).map((id) => (
+    <div key={id} className="skeleton h-28" />
+  ));
+}
 
-function TopPerformerCard({
+// ─── Rows ────────────────────────────────────────────────────────────────────
+
+function TopAPYPoolRow({
   pool,
-  type,
-  visible,
+  rank,
+  history,
 }: {
   pool: Pool;
-  type: "apy" | "volume";
-  visible: boolean;
+  rank: number;
+  history?: Parameters<typeof RiskBadge>[0]["history"];
 }) {
-  const isAPY = type === "apy";
-  const accentColor = isAPY ? NEON_GREEN : ELECTRIC_BLUE;
-  const label = isAPY ? "Best APY" : "Highest Volume";
-  const metricLabel = isAPY ? "APY" : "24h Volume";
-  const metricValue = isAPY
-    ? `${pool.apy.current.toFixed(1)}%`
-    : formatUSD(pool.stats.volume24h);
-  const Icon = isAPY ? Trophy : Flame;
-  const ocid = isAPY
-    ? "dashboard.top_performer.apy"
-    : "dashboard.top_performer.volume";
-
-  return (
-    <div
-      data-ocid={ocid}
-      className="relative rounded-xl overflow-hidden p-5 transition-all duration-300"
-      style={{
-        background: `linear-gradient(135deg, rgba(13,13,13,0.92) 0%, ${accentColor}08 100%)`,
-        border: `1px solid ${accentColor}35`,
-        boxShadow: `0 0 30px ${accentColor}12, inset 0 1px 0 ${accentColor}18`,
-        backdropFilter: "blur(12px)",
-      }}
-      onMouseEnter={(e) => {
-        const el = e.currentTarget as HTMLDivElement;
-        el.style.boxShadow = `0 0 40px ${accentColor}22, inset 0 1px 0 ${accentColor}25`;
-        el.style.borderColor = `${accentColor}55`;
-        el.style.transform = "translateY(-2px)";
-      }}
-      onMouseLeave={(e) => {
-        const el = e.currentTarget as HTMLDivElement;
-        el.style.boxShadow = `0 0 30px ${accentColor}12, inset 0 1px 0 ${accentColor}18`;
-        el.style.borderColor = `${accentColor}35`;
-        el.style.transform = "";
-      }}
-    >
-      {/* Decorative corner glow */}
-      <div
-        className="absolute top-0 right-0 w-24 h-24 rounded-full pointer-events-none"
-        style={{
-          background: `radial-gradient(circle, ${accentColor}18 0%, transparent 70%)`,
-          transform: "translate(30%, -30%)",
-        }}
-      />
-
-      <div className="flex items-start justify-between mb-3">
-        <div>
-          <span
-            className="text-[10px] font-bold uppercase tracking-[2px] font-mono"
-            style={{ color: "#909090" }}
-          >
-            {label}
-          </span>
-          <div className="flex items-center gap-2 mt-1">
-            <ProtocolBadge protocol={pool.protocol} size="sm" />
-            <span className="text-xs" style={{ color: "#909090" }}>
-              {pool.chain}
-            </span>
-          </div>
-        </div>
-        <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-          style={{
-            background: `${accentColor}15`,
-            border: `1px solid ${accentColor}35`,
-          }}
-        >
-          <Icon className="w-4 h-4" style={{ color: accentColor }} />
-        </div>
-      </div>
-
-      <p className="font-medium text-base mb-1" style={{ color: "#e0e0e0" }}>
-        {pool.name}
-      </p>
-
-      <p
-        className={cn(
-          "font-mono text-3xl font-bold tracking-tight transition-all duration-300",
-          visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2",
-        )}
-        style={{
-          color: accentColor,
-          textShadow: `0 0 16px ${accentColor}80, 0 0 32px ${accentColor}40`,
-        }}
-      >
-        {metricValue}
-      </p>
-
-      <div className="flex items-center gap-3 mt-2">
-        <span
-          className="text-[10px] font-mono uppercase tracking-wide"
-          style={{ color: "#909090" }}
-        >
-          {metricLabel}
-        </span>
-        {isAPY && <PercentChange value={pool.apy.day1Change} size="sm" />}
-      </div>
-    </div>
-  );
-}
-
-// ─── Top APY Pool Row ────────────────────────────────────────────────────────
-
-function TopAPYPoolRow({ pool, rank }: { pool: Pool; rank: number }) {
-  const isUp = pool.apy.day1Change >= 0;
+  const change = pool.apy.day1Change;
   return (
     <div
       data-ocid={`dashboard.top_apy.item.${rank}`}
-      className="flex items-center gap-3 py-2.5 px-3 rounded-lg transition-all duration-200 group cursor-default"
-      style={{ borderBottom: "1px solid rgba(0,163,255,0.06)" }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background =
-          "rgba(0,163,255,0.06)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background = "transparent";
-      }}
+      className="flex items-center gap-3 rounded-lg border-b border-border/40 px-3 py-2.5 transition-smooth hover:bg-muted/50"
     >
       <span
-        className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 font-mono"
-        style={{
-          background:
-            rank <= 2 ? `${ELECTRIC_BLUE}20` : "rgba(255,255,255,0.05)",
-          color: rank <= 2 ? ELECTRIC_BLUE : "#909090",
-          border:
-            rank <= 2
-              ? `1px solid ${ELECTRIC_BLUE}40`
-              : "1px solid rgba(255,255,255,0.08)",
-        }}
+        className={cn(
+          "flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border font-mono text-[10px] font-bold",
+          rank <= 2
+            ? "border-primary/40 bg-primary/15 text-primary"
+            : "border-border bg-muted text-muted-foreground",
+        )}
       >
         {rank}
       </span>
-      <div className="flex-1 min-w-0">
-        <p
-          className="font-medium text-sm truncate"
-          style={{ color: "#e0e0e0" }}
-        >
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-foreground">
           {pool.name}
         </p>
-        <div className="flex items-center gap-1.5 mt-0.5">
+        <div className="mt-0.5 flex items-center gap-1.5">
           <ProtocolBadge protocol={pool.protocol} size="sm" />
-          <span className="text-xs" style={{ color: "#909090" }}>
+          <span className="truncate text-xs text-muted-foreground">
             {pool.chain}
           </span>
         </div>
       </div>
-      <div className="text-right flex-shrink-0">
-        <p
-          className="font-mono text-sm font-bold"
-          style={{ color: NEON_GREEN, textShadow: `0 0 8px ${NEON_GREEN}80` }}
-        >
+      <div className="flex-shrink-0 text-right">
+        <p className="accent-glow font-mono text-sm">
           {pool.apy.current.toFixed(1)}%
         </p>
-        <div
-          className="flex items-center justify-end gap-0.5 text-xs font-mono"
-          style={{ color: isUp ? NEON_GREEN : DANGER_RED }}
-        >
-          {isUp ? (
-            <TrendingUp className="w-3 h-3" />
-          ) : (
-            <TrendingDown className="w-3 h-3" />
-          )}
-          {isUp ? "+" : ""}
-          {pool.apy.day1Change.toFixed(1)}%
-        </div>
+        <p className={cn("font-mono text-xs", trendClass(change))}>
+          {signed(change)}
+        </p>
       </div>
-      <div className="text-right flex-shrink-0 hidden sm:block">
-        <p className="font-mono text-xs" style={{ color: ELECTRIC_BLUE }}>
+      <div className="hidden flex-shrink-0 text-right sm:block">
+        <p className="font-mono text-xs text-primary">
           {formatUSD(pool.stats.tvl)}
         </p>
-        <p
-          className="text-[10px] uppercase tracking-wide"
-          style={{ color: "#909090" }}
-        >
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
           TVL
         </p>
       </div>
+      <RiskBadge pool={pool} history={history} className="flex-shrink-0" />
     </div>
   );
 }
 
-// ─── Market Mover Row ────────────────────────────────────────────────────────
-
-function MarketMoverRow({
-  pool,
-  rank,
+function MoverColumn({
+  title,
+  pools,
   type,
-}: { pool: Pool; rank: number; type: "gainer" | "loser" }) {
-  const isGainer = type === "gainer";
-  const change = pool.apy.day1Change;
+}: { title: string; pools: Pool[]; type: "gainer" | "loser" }) {
+  const Icon = type === "gainer" ? TrendingUp : TrendingDown;
   return (
-    <div
-      data-ocid={`dashboard.mover_${type}.${rank}`}
-      className="flex items-center justify-between py-2 px-3 rounded-lg transition-all duration-200 cursor-default"
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background =
-          "rgba(255,255,255,0.04)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background = "transparent";
-      }}
-    >
-      <div className="flex items-center gap-2 min-w-0">
-        <ProtocolBadge protocol={pool.protocol} size="sm" />
-        <span
-          className="font-medium text-sm truncate"
-          style={{ color: "#e0e0e0" }}
-        >
-          {pool.name}
-        </span>
-      </div>
-      <div
-        className="flex items-center gap-1 font-mono text-sm font-semibold flex-shrink-0"
-        style={{
-          color: isGainer ? NEON_GREEN : DANGER_RED,
-          textShadow: isGainer
-            ? `0 0 6px ${NEON_GREEN}60`
-            : `0 0 6px ${DANGER_RED}60`,
-        }}
-      >
-        {isGainer ? (
-          <TrendingUp className="w-3.5 h-3.5" />
-        ) : (
-          <TrendingDown className="w-3.5 h-3.5" />
+    <div>
+      <p
+        className={cn(
+          "flex items-center gap-1 px-3 pb-1 font-mono text-[10px] font-bold uppercase tracking-[1.5px]",
+          type === "gainer" ? "text-accent" : "text-destructive",
         )}
-        {isGainer ? "+" : ""}
-        {change.toFixed(1)}%
-      </div>
-    </div>
-  );
-}
-
-// ─── Pie Legend ───────────────────────────────────────────────────────────────
-
-function PieLegend({
-  data,
-}: { data: { name: string; value: number; color: string; pct: number }[] }) {
-  return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-3">
-      {data.map((entry) => (
-        <div key={entry.name} className="flex items-center gap-2 min-w-0">
-          <span
-            className="w-2 h-2 rounded-full flex-shrink-0"
-            style={{
-              background: entry.color,
-              boxShadow: `0 0 4px ${entry.color}80`,
-            }}
-          />
-          <div className="min-w-0">
-            <p
-              className="text-xs font-medium truncate"
-              style={{ color: "#e0e0e0" }}
-            >
-              {entry.name}
-            </p>
-            <p className="text-[10px] font-mono" style={{ color: "#909090" }}>
-              {entry.pct.toFixed(1)}%
-            </p>
+      >
+        <Icon className="h-3 w-3" /> {title}
+      </p>
+      {pools.length === 0 && (
+        <p className="px-3 py-2 text-xs text-muted-foreground">
+          No {type === "gainer" ? "gainers" : "losers"} in the last 24h.
+        </p>
+      )}
+      {pools.map((pool, i) => (
+        <div
+          key={pool.id}
+          data-ocid={`dashboard.mover_${type}.${i + 1}`}
+          className="flex items-center justify-between gap-2 rounded-lg px-3 py-2 transition-smooth hover:bg-muted/50"
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <ProtocolBadge protocol={pool.protocol} size="sm" />
+            <span className="truncate text-sm font-medium text-foreground">
+              {pool.name}
+            </span>
           </div>
+          <span
+            className={cn(
+              "flex-shrink-0 font-mono text-sm font-semibold",
+              trendClass(pool.apy.day1Change),
+            )}
+          >
+            {signed(pool.apy.day1Change)}
+          </span>
         </div>
       ))}
     </div>
   );
 }
 
-// ─── Glass Skeleton ───────────────────────────────────────────────────────────
+// ─── Donation ────────────────────────────────────────────────────────────────
 
-function GlassSkeleton({ className }: { className?: string }) {
+function DonationButton() {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const handleCopy = useCallback(async (address: string) => {
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopied(address);
+      toast.success("Address copied to clipboard");
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      toast.error("Copy failed — please copy manually");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    function onClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
     <div
-      className={cn("rounded-lg animate-pulse", className)}
-      style={{ background: "rgba(0,163,255,0.05)" }}
-    />
+      ref={ref}
+      className="relative inline-block"
+      data-ocid="dashboard.donate.panel"
+    >
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        data-ocid="dashboard.donate.open_modal_button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="gap-2 border-primary/40 bg-primary/10 text-primary hover:bg-primary/15"
+      >
+        <HandCoins className="h-4 w-4" />
+        Support / Donate
+        <ChevronDown
+          className={cn(
+            "h-3.5 w-3.5 transition-transform duration-200",
+            open && "rotate-180",
+          )}
+        />
+      </Button>
+      {open && (
+        <div
+          data-ocid="dashboard.donate.dialog"
+          className="absolute right-0 top-full z-50 mt-2 w-[min(90vw,360px)] space-y-3 rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-elevated"
+        >
+          <p className={LABEL_CLASS}>Choose a network to donate</p>
+          {DONATION_ADDRESSES.map((item) => {
+            const isCopied = copied === item.address;
+            return (
+              <div
+                key={item.symbol}
+                data-ocid={`dashboard.donate.${item.symbol.toLowerCase()}_row`}
+                className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted/40 p-3"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/15 text-sm font-bold text-primary">
+                    {item.icon}
+                  </span>
+                  <span className="text-sm font-semibold">{item.network}</span>
+                  <span className="ml-auto rounded bg-primary/15 px-1.5 py-0.5 font-mono text-xs text-primary">
+                    {item.symbol}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <code
+                    className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+                    title={item.address}
+                  >
+                    {item.address}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    data-ocid={`dashboard.donate.${item.symbol.toLowerCase()}_copy`}
+                    onClick={() => handleCopy(item.address)}
+                    aria-label={`Copy ${item.symbol} address`}
+                    className="h-7 w-7 flex-shrink-0"
+                  >
+                    {isCopied ? (
+                      <Check className="h-3.5 w-3.5 text-accent" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
+                {isCopied && (
+                  <p
+                    data-ocid={`dashboard.donate.${item.symbol.toLowerCase()}_success_state`}
+                    className="font-mono text-xs font-medium text-accent"
+                  >
+                    ✓ Address copied!
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// ─── Page ────────────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
-  const loading = useSimulatedLoading(950);
-  const [dataVisible, setDataVisible] = useState(false);
+  const pools = usePools();
+  const prices = useTokenPrices(TICKER_IDS);
+  const positions = usePositions();
+  const { isAuthenticated, isInitializing } = useAuth();
 
-  // Trigger smooth fade-in after load
-  useEffect(() => {
-    if (!loading) {
-      const t = setTimeout(() => setDataVisible(true), 60);
-      return () => clearTimeout(t);
-    }
-  }, [loading]);
+  const topTvlPool = useMemo(
+    () =>
+      pools.data.reduce<Pool | undefined>(
+        (best, p) => (!best || p.stats.tvl > best.stats.tvl ? p : best),
+        undefined,
+      ),
+    [pools.data],
+  );
+  const history = usePoolHistory(topTvlPool?.poolId ?? topTvlPool?.id);
 
   const stats = useMemo(() => {
-    const totalTVL = MOCK_POOLS.reduce((s, p) => s + p.stats.tvl, 0);
-    const totalVolume = MOCK_POOLS.reduce((s, p) => s + p.stats.volume24h, 0);
-    const totalFees = MOCK_POOLS.reduce((s, p) => s + p.stats.fees24h, 0);
-    const avgAPY =
-      MOCK_POOLS.reduce((s, p) => s + p.apy.current, 0) / MOCK_POOLS.length;
-    const bestPool = [...MOCK_POOLS].sort(
-      (a, b) => b.apy.current - a.apy.current,
-    )[0];
-    const highestVolumePool = [...MOCK_POOLS].sort(
-      (a, b) => b.stats.volume24h - a.stats.volume24h,
-    )[0];
-    return {
-      totalTVL,
-      totalVolume,
-      totalFees,
-      avgAPY,
-      poolCount: MOCK_POOLS.length,
-      bestPool,
-      highestVolumePool,
-    };
-  }, []);
+    const list = pools.data;
+    if (list.length === 0) return null;
+    const totalTVL = list.reduce((s, p) => s + p.stats.tvl, 0);
+    const avgAPY = list.reduce((s, p) => s + p.apy.current, 0) / list.length;
+    const avgChange =
+      list.reduce((s, p) => s + p.apy.day1Change, 0) / list.length;
+    const best = list.reduce((a, b) => (b.apy.current > a.apy.current ? b : a));
+    const protocols = new Set(list.map((p) => p.protocol)).size;
+    return { totalTVL, avgAPY, avgChange, best, protocols, count: list.length };
+  }, [pools.data]);
 
   const tvlByProtocol = useMemo(() => {
-    const total = MOCK_POOLS.reduce((s, p) => s + p.stats.tvl, 0);
-    return (Object.keys(PROTOCOL_METADATA) as Protocol[]).map((proto) => {
-      const value = MOCK_POOLS.filter((p) => p.protocol === proto).reduce(
-        (s, p) => s + p.stats.tvl,
-        0,
-      );
-      return {
-        name: PROTOCOL_METADATA[proto].name,
-        value,
-        color: PROTOCOL_COLORS[proto],
-        pct: (value / total) * 100,
-      };
-    });
-  }, []);
-
-  const portfolioAllocation = useMemo(() => {
-    const total = MOCK_POSITIONS.reduce(
-      (s, e) => s + e.position.currentValueUSD,
-      0,
-    );
-    const byProtocol: Record<string, number> = {};
-    for (const e of MOCK_POSITIONS) {
-      byProtocol[e.position.protocol] =
-        (byProtocol[e.position.protocol] ?? 0) + e.position.currentValueUSD;
+    const totals = new Map<string, number>();
+    for (const p of pools.data) {
+      totals.set(p.protocol, (totals.get(p.protocol) ?? 0) + p.stats.tvl);
     }
-    return (Object.keys(byProtocol) as Protocol[]).map((proto) => ({
-      name: PROTOCOL_METADATA[proto]?.name ?? proto,
-      value: byProtocol[proto],
-      color: PROTOCOL_COLORS[proto],
-      pct: (byProtocol[proto] / total) * 100,
-    }));
-  }, []);
+    const sum = [...totals.values()].reduce((a, b) => a + b, 0);
+    return [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([proto, value]) => ({
+        key: proto,
+        name: PROTOCOL_METADATA[proto]?.name ?? proto,
+        value,
+        pct: sum > 0 ? (value / sum) * 100 : 0,
+        style: PROTOCOL_STYLE[proto] ?? FALLBACK_STYLE,
+      }));
+  }, [pools.data]);
 
   const topAPYPools = useMemo(
     () =>
-      [...MOCK_POOLS].sort((a, b) => b.apy.current - a.apy.current).slice(0, 5),
-    [],
+      [...pools.data].sort((a, b) => b.apy.current - a.apy.current).slice(0, 5),
+    [pools.data],
   );
-
-  const apyTrendData = useMemo(
-    () => MOCK_POOLS[0].apyTrend.day30.slice(-14),
-    [],
-  );
-
   const gainers = useMemo(
     () =>
-      [...MOCK_POOLS]
+      pools.data
+        .filter((p) => p.apy.day1Change > 0)
         .sort((a, b) => b.apy.day1Change - a.apy.day1Change)
         .slice(0, 4),
-    [],
+    [pools.data],
   );
-
   const losers = useMemo(
     () =>
-      [...MOCK_POOLS]
+      pools.data
+        .filter((p) => p.apy.day1Change < 0)
         .sort((a, b) => a.apy.day1Change - b.apy.day1Change)
         .slice(0, 4),
-    [],
+    [pools.data],
   );
 
-  const poolsEmpty = !loading && MOCK_POOLS.length === 0;
+  const chartData = useMemo(
+    () => history.data.slice(-30).map((h) => ({ date: h.date, apy: h.apy })),
+    [history.data],
+  );
 
-  const kpis: KPICardProps[] = [
-    {
-      label: "Total TVL",
-      value: formatUSD(stats.totalTVL),
-      change: KPI_CHANGES.tvl,
-      icon: Waves,
-      ocid: "dashboard.kpi.1",
-      glowColor: "blue",
-      source: "Mock",
-    },
-    {
-      label: "24h Volume",
-      value: formatUSD(stats.totalVolume),
-      change: KPI_CHANGES.volume,
-      icon: Activity,
-      ocid: "dashboard.kpi.2",
-      glowColor: "neutral",
-      source: "Mock",
-    },
-    {
-      label: "24h Fees",
-      value: formatUSD(stats.totalFees),
-      change: KPI_CHANGES.fees,
-      icon: Droplets,
-      ocid: "dashboard.kpi.3",
-      glowColor: "green",
-      source: "Mock",
-    },
-    {
-      label: "Best Pool APY",
-      value: `${stats.bestPool.apy.current.toFixed(1)}%`,
-      change: KPI_CHANGES.apy,
-      icon: Trophy,
-      ocid: "dashboard.kpi.4",
-      glowColor: "green",
-      source: "Mock",
-    },
-  ];
+  const poolLookup = useMemo(() => {
+    const map = new Map<string, Pool>();
+    for (const p of pools.data) {
+      map.set(p.id, p);
+      if (p.poolId) map.set(p.poolId, p);
+    }
+    return map;
+  }, [pools.data]);
+
+  const positionRows = useMemo(
+    () =>
+      (positions.data ?? [])
+        .map((pos) => {
+          const pool = poolLookup.get(pos.poolId);
+          const apy = pool?.apy.current ?? 0;
+          return {
+            pos,
+            pool,
+            estimated: estimateValue(pos.amountUsd, pos.entryTimestamp, apy),
+          };
+        })
+        .sort((a, b) => b.estimated - a.estimated),
+    [positions.data, poolLookup],
+  );
+  const positionsTotal = positionRows.reduce((s, r) => s + r.estimated, 0);
+
+  const poolsEmpty =
+    !pools.isLoading && !pools.isError && pools.data.length === 0;
+  const poolsFailed = pools.isError && pools.data.length === 0;
+  const demoBadge = pools.isDemo ? <DemoBadge /> : null;
+  const positionsLoading =
+    isInitializing ||
+    (isAuthenticated && positions.data === undefined && !positions.isError);
+  const priceRows = TICKERS.filter((t) => prices.data[t.id]);
 
   return (
-    <div
-      data-ocid="dashboard.page"
-      className="p-4 md:p-6 space-y-6"
-      style={{ background: "#0D0D0D", minHeight: "100%" }}
-    >
-      {/* ── Top Bar ── */}
-      <div className="flex items-center flex-wrap gap-3">
-        <Breadcrumb items={[{ label: "Home" }]} />
-        <div
-          className="w-2 h-2 rounded-full animate-pulse"
-          style={{
-            background: NEON_GREEN,
-            boxShadow: `0 0 8px ${NEON_GREEN}`,
-          }}
-        />
-        <span
-          className="text-[10px] font-bold uppercase tracking-[2px] font-mono"
-          style={{ color: "#909090" }}
-        >
-          Live Market Data
-        </span>
+    <div data-ocid="dashboard.page" className="space-y-6 p-4 md:p-6">
+      {/* Top bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          {pools.isDemo ? (
+            <DemoBadge />
+          ) : (
+            <span className="live-badge">Live market data</span>
+          )}
+          <span className="hidden text-xs text-muted-foreground sm:inline">
+            Source: DefiLlama and CoinGecko public APIs
+          </span>
+        </div>
+        <DonationButton />
       </div>
 
-      {/* ── Hero Banner ── */}
-      <div
-        className="relative rounded-xl overflow-hidden"
-        style={{
-          border: `1px solid ${ELECTRIC_BLUE}25`,
-          boxShadow: `0 0 40px ${ELECTRIC_BLUE}08, inset 0 1px 0 ${ELECTRIC_BLUE}15`,
-          backgroundImage:
-            "url(/assets/generated/defi-dashboard-hero.dim_1600x900.jpg)",
-          backgroundSize: "cover",
-          backgroundPosition: "center top",
-        }}
-      >
+      {/* Fallback / failure banner */}
+      {pools.isError && pools.data.length > 0 && (
         <div
-          className="absolute inset-0"
-          style={{
-            background:
-              "linear-gradient(135deg, rgba(13,13,13,0.92) 0%, rgba(0,163,255,0.04) 50%, rgba(13,13,13,0.88) 100%)",
-            backdropFilter: "blur(2px)",
-          }}
-        />
-        <div className="relative p-5 md:p-8">
-          <div className="flex items-center gap-2 mb-2">
-            <LayoutDashboard
-              className="w-4 h-4"
-              style={{ color: ELECTRIC_BLUE }}
-            />
-            <span
-              className="text-[10px] font-bold uppercase tracking-[2px] font-mono"
-              style={{ color: "#909090" }}
-            >
-              Overview
-            </span>
-          </div>
-          <h1
-            className="font-mono text-2xl md:text-3xl font-bold mb-1.5 tracking-tight"
-            style={{
-              color: "#e0e0e0",
-              textShadow: `0 0 30px ${ELECTRIC_BLUE}20`,
-            }}
+          data-ocid="dashboard.demo_banner"
+          className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-warning/60 bg-warning/10 px-4 py-3 text-sm"
+        >
+          {pools.isDemo && <DemoBadge />}
+          <span className="min-w-0 flex-1 text-foreground">
+            {pools.isDemo
+              ? "The live DefiLlama feed could not be reached, so every pool figure below is demo data."
+              : "The latest DefiLlama refresh failed. Showing the last successfully loaded live data."}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-ocid="dashboard.demo_banner.retry_button"
+            onClick={pools.refetch}
           >
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            Retry live data
+          </Button>
+        </div>
+      )}
+
+      {/* Hero */}
+      <div className="relative overflow-hidden rounded-xl border border-primary/25">
+        <img
+          src="/assets/generated/defi-dashboard-hero.dim_1600x900.jpg"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover object-top"
+        />
+        <div className="absolute inset-0 bg-background/85" />
+        <div className="relative p-5 md:p-8">
+          <div className="mb-2 flex items-center gap-2">
+            <LayoutDashboard className="h-4 w-4 text-primary" />
+            <span className={LABEL_CLASS}>Overview</span>
+          </div>
+          <h1 className="mb-1.5 font-mono text-2xl font-bold tracking-tight text-foreground md:text-3xl">
             DeFi Pool Analytics
           </h1>
-          <p
-            className="text-sm md:text-base max-w-xl"
-            style={{ color: "#909090" }}
-          >
-            Real-time liquidity intelligence across Uniswap, PancakeSwap,
-            Raydium &amp; ICP
+          <p className="max-w-xl text-sm text-muted-foreground md:text-base">
+            Liquidity intelligence across Uniswap, PancakeSwap, Raydium &amp;
+            ICP
           </p>
-          <div className="flex flex-wrap gap-2 mt-4">
-            {(Object.keys(PROTOCOL_METADATA) as Protocol[]).map((p) => (
-              <ProtocolBadge key={p} protocol={p} showChain />
+          <div className="mt-4 flex flex-wrap gap-2">
+            {Object.keys(PROTOCOL_METADATA).map((p) => (
+              <ProtocolBadge
+                key={p}
+                protocol={p as Pool["protocol"]}
+                showChain
+              />
             ))}
           </div>
         </div>
       </div>
 
-      {/* ── Empty State ── */}
+      {poolsFailed && (
+        <ErrorState
+          title="Pool data unavailable"
+          message="DefiLlama could not be reached. Check your connection and try again."
+          onRetry={pools.refetch}
+        />
+      )}
       {poolsEmpty && (
-        <GlassCard ocid="dashboard.empty_state" hover={false}>
-          <div className="flex flex-col items-center justify-center py-14 text-center gap-3">
-            <div
-              className="w-14 h-14 rounded-full flex items-center justify-center"
-              style={{
-                background: `${ELECTRIC_BLUE}10`,
-                border: `1px solid ${ELECTRIC_BLUE}25`,
-              }}
-            >
-              <Droplets className="w-7 h-7" style={{ color: ELECTRIC_BLUE }} />
-            </div>
-            <div>
-              <p
-                className="font-semibold text-base"
-                style={{ color: "#e0e0e0" }}
-              >
-                No pool data available
-              </p>
-              <p className="text-sm mt-1 max-w-xs" style={{ color: "#909090" }}>
-                Data will appear here once connected to live feeds
-              </p>
-            </div>
-          </div>
-        </GlassCard>
+        <EmptyState
+          title="No pool data available"
+          description="No pools matched the current filters from the data source."
+          icon={<Droplets className="h-5 w-5" aria-hidden />}
+        />
       )}
 
-      {/* ── Top Performers Section ── */}
-      {!loading && (
-        <div data-ocid="dashboard.top_performers.section">
-          <div className="flex items-center gap-2 mb-3">
-            <Star className="w-4 h-4" style={{ color: "#f59e0b" }} />
-            <span
-              className="text-xl font-semibold tracking-tight"
-              style={{ color: "#e0e0e0" }}
-            >
-              Top Performers
-            </span>
-            <div
-              className="flex-1 h-px ml-2"
-              style={{
-                background:
-                  "linear-gradient(to right, rgba(245,158,11,0.3), transparent)",
-              }}
+      {/* KPIs */}
+      <div className="grid grid-cols-2 gap-3 md:gap-4 lg:grid-cols-4">
+        {pools.isLoading && <KPISkeletons />}
+        {stats && (
+          <>
+            <KPICard
+              ocid="dashboard.kpi.1"
+              label="Tracked TVL"
+              value={formatUSD(stats.totalTVL)}
+              icon={Waves}
+              tone="primary"
+              sub={
+                <span className="flex flex-wrap items-center gap-1.5">
+                  across {stats.count} pools {demoBadge}
+                </span>
+              }
             />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <TopPerformerCard
-              pool={stats.bestPool}
-              type="apy"
-              visible={dataVisible}
+            <KPICard
+              ocid="dashboard.kpi.2"
+              label="Pools tracked"
+              value={String(stats.count)}
+              icon={Droplets}
+              tone="neutral"
+              sub={`${stats.protocols} protocol groups`}
             />
-            <TopPerformerCard
-              pool={stats.highestVolumePool}
-              type="volume"
-              visible={dataVisible}
+            <KPICard
+              ocid="dashboard.kpi.3"
+              label="Average APY"
+              value={`${stats.avgAPY.toFixed(1)}%`}
+              icon={TrendingUp}
+              tone="accent"
+              sub={
+                <span className={trendClass(stats.avgChange)}>
+                  {signed(stats.avgChange)} avg 24h change
+                </span>
+              }
             />
-          </div>
-        </div>
-      )}
-      {loading && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <GlassSkeleton className="h-40" />
-          <GlassSkeleton className="h-40" />
-        </div>
-      )}
-
-      {/* ── KPI Row ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-        {loading
-          ? Array.from({ length: 4 }, (_, i) => (
-              <GlassSkeleton key={i.toString()} className="h-36" />
-            ))
-          : kpis.map((kpi) => (
-              <KPICard key={kpi.label} {...kpi} visible={dataVisible} />
-            ))}
+            <KPICard
+              ocid="dashboard.kpi.4"
+              label="Best pool APY"
+              value={`${stats.best.apy.current.toFixed(1)}%`}
+              icon={Trophy}
+              tone="accent"
+              sub={<span className="block truncate">{stats.best.name}</span>}
+            />
+          </>
+        )}
       </div>
 
-      {/* ── Charts Row ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
-        {/* APY Trend */}
-        <GlassCard className="lg:col-span-1">
-          <div className="p-4 pb-2">
-            <SectionHeading icon={Activity} label="APY Trend — 14 days" />
-            <p className="text-xs mt-0.5" style={{ color: "#909090" }}>
-              ETH/USDC (Uniswap)
+      {/* Charts */}
+      <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-3">
+        <Panel ocid="dashboard.apy_chart.panel">
+          <div className="space-y-0.5 p-4 pb-2">
+            <SectionHeading
+              icon={Activity}
+              label="APY trend · 30 days"
+              badge={history.isDemo ? <DemoBadge /> : null}
+            />
+            <p className="truncate text-xs text-muted-foreground">
+              {topTvlPool
+                ? `${topTvlPool.name} · largest pool by TVL (${formatUSD(topTvlPool.stats.tvl)})`
+                : "Largest pool by TVL"}
             </p>
           </div>
-          <div className="px-2 pb-3">
-            {loading ? (
-              <div
-                data-ocid="dashboard.apy_chart.loading_state"
-                className="mt-2 px-2"
-              >
-                <GlassSkeleton className="h-[160px]" />
-              </div>
-            ) : (
-              <>
-                <ResponsiveContainer width="100%" height={160}>
+          <div className="px-2 pb-4">
+            {(pools.isLoading || history.isLoading) && (
+              <LoadingState label="Loading APY history…" className="m-2 py-8" />
+            )}
+            {!pools.isLoading &&
+              history.isError &&
+              history.data.length === 0 && (
+                <ErrorState
+                  title="APY history unavailable"
+                  onRetry={history.refetch}
+                  className="m-2 py-6"
+                />
+              )}
+            {!pools.isLoading &&
+              !history.isLoading &&
+              !history.isError &&
+              chartData.length < 2 && (
+                <EmptyState
+                  title="No APY history yet"
+                  description="This pool has no daily history to chart."
+                  className="m-2 py-8"
+                />
+              )}
+            {chartData.length >= 2 && (
+              <div className="text-primary">
+                <ResponsiveContainer width="100%" height={170}>
                   <AreaChart
-                    data={apyTrendData}
-                    margin={{ top: 4, right: 8, bottom: 0, left: -24 }}
+                    data={chartData}
+                    margin={{ top: 4, right: 8, bottom: 0, left: 8 }}
                   >
                     <defs>
                       <linearGradient id="apyGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop
                           offset="5%"
-                          stopColor={ELECTRIC_BLUE}
-                          stopOpacity={0.2}
+                          stopColor="currentColor"
+                          stopOpacity={0.3}
                         />
                         <stop
                           offset="95%"
-                          stopColor={ELECTRIC_BLUE}
+                          stopColor="currentColor"
                           stopOpacity={0}
                         />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="date" hide />
-                    <YAxis hide />
+                    <XAxis
+                      dataKey="date"
+                      tickLine={false}
+                      axisLine={false}
+                      minTickGap={36}
+                      tick={{
+                        className:
+                          "fill-muted-foreground font-mono text-[10px]",
+                      }}
+                    />
+                    <YAxis hide domain={["auto", "auto"]} />
                     <Tooltip
-                      contentStyle={GLASS_TOOLTIP_STYLE}
-                      formatter={(v: number) => [`${v.toFixed(1)}%`, "APY"]}
-                      labelStyle={{ color: "#909090" }}
-                      itemStyle={{ color: ELECTRIC_BLUE }}
+                      content={
+                        <ChartTip
+                          seriesName="APY"
+                          format={(v) => `${v.toFixed(2)}%`}
+                        />
+                      }
                     />
                     <Area
                       type="monotone"
                       dataKey="apy"
-                      stroke={ELECTRIC_BLUE}
+                      stroke="currentColor"
                       strokeWidth={2}
                       fill="url(#apyGrad)"
                       dot={false}
-                      activeDot={{
-                        r: 4,
-                        fill: ELECTRIC_BLUE,
-                        stroke: "#0D0D0D",
-                        strokeWidth: 2,
-                      }}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
-                <div className="px-2 pt-1 flex items-center justify-between">
-                  <DataSourceBadge
-                    source="Uniswap"
-                    lastUpdated={LAST_UPDATED}
-                  />
-                </div>
-              </>
+              </div>
             )}
           </div>
-        </GlassCard>
+        </Panel>
 
-        {/* Protocol Distribution */}
-        <GlassCard>
-          <div className="p-4 pb-2">
+        <Panel ocid="dashboard.tvl_chart.panel">
+          <div className="space-y-0.5 p-4 pb-2">
             <SectionHeading
               icon={BarChart2}
-              label="TVL by Protocol"
-              iconColor={NEON_GREEN}
+              label="TVL by protocol"
+              badge={demoBadge}
             />
-            <p className="text-xs mt-0.5" style={{ color: "#909090" }}>
-              Distribution across chains
+            <p className="text-xs text-muted-foreground">
+              Share of tracked liquidity
             </p>
           </div>
           <div className="px-4 pb-4">
-            {loading ? (
-              <div data-ocid="dashboard.tvl_chart.loading_state">
-                <div
-                  className="h-32 w-32 mx-auto rounded-full animate-pulse mt-2"
-                  style={{ background: "rgba(0,163,255,0.05)" }}
-                />
-                <div className="grid grid-cols-2 gap-2 mt-4">
-                  {[1, 2, 3, 4].map((i) => (
-                    <GlassSkeleton key={i} className="h-4" />
-                  ))}
-                </div>
-              </div>
-            ) : (
+            {pools.isLoading && (
+              <LoadingState label="Loading TVL…" className="py-8" />
+            )}
+            {tvlByProtocol.length > 0 && (
               <>
                 <ResponsiveContainer width="100%" height={130}>
                   <PieChart>
@@ -961,383 +844,288 @@ export function DashboardPage() {
                       outerRadius={58}
                       paddingAngle={3}
                       dataKey="value"
+                      nameKey="name"
                       strokeWidth={0}
                     >
                       {tvlByProtocol.map((entry) => (
-                        <Cell
-                          key={entry.name}
-                          fill={entry.color}
-                          style={{
-                            filter: `drop-shadow(0 0 4px ${entry.color}80)`,
-                          }}
-                        />
+                        <Cell key={entry.key} className={entry.style.fill} />
                       ))}
                     </Pie>
                     <Tooltip
-                      contentStyle={GLASS_TOOLTIP_STYLE}
-                      formatter={(v: number) => [formatUSD(v), "TVL"]}
-                      itemStyle={{ color: NEON_GREEN }}
+                      content={<ChartTip seriesName="TVL" format={formatUSD} />}
                     />
                   </PieChart>
                 </ResponsiveContainer>
-                <PieLegend data={tvlByProtocol} />
-                <div className="mt-3 flex gap-1.5 flex-wrap">
-                  <DataSourceBadge
-                    source="ICPSwap"
-                    lastUpdated={LAST_UPDATED}
-                  />
-                  <DataSourceBadge
-                    source="Uniswap"
-                    lastUpdated={LAST_UPDATED}
-                  />
-                </div>
+                <ul className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+                  {tvlByProtocol.map((entry) => (
+                    <li
+                      key={entry.key}
+                      className="flex min-w-0 items-center gap-2"
+                    >
+                      <span
+                        className={cn(
+                          "h-2 w-2 flex-shrink-0 rounded-full",
+                          entry.style.bg,
+                        )}
+                      />
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-medium text-foreground">
+                          {entry.name}
+                        </p>
+                        <p className="font-mono text-[10px] text-muted-foreground">
+                          {entry.pct.toFixed(1)}% · {formatUSD(entry.value)}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               </>
             )}
           </div>
-        </GlassCard>
+        </Panel>
 
-        {/* Portfolio Allocation */}
-        <GlassCard>
+        <Panel ocid="dashboard.prices.panel">
+          <div className="space-y-0.5 p-4 pb-2">
+            <SectionHeading
+              icon={Coins}
+              label="Token prices"
+              badge={prices.isDemo ? <DemoBadge /> : null}
+            />
+            <p className="text-xs text-muted-foreground">USD, 24h change</p>
+          </div>
+          <div className="px-2 pb-3">
+            {prices.isLoading && (
+              <LoadingState label="Loading prices…" className="m-2 py-8" />
+            )}
+            {prices.isError && priceRows.length === 0 && (
+              <ErrorState
+                title="Prices unavailable"
+                onRetry={prices.refetch}
+                className="m-2 py-6"
+              />
+            )}
+            {priceRows.length > 0 && (
+              <ul data-ocid="dashboard.prices.list">
+                {priceRows.map((t, i) => {
+                  const price = prices.data[t.id];
+                  return (
+                    <li
+                      key={t.id}
+                      data-ocid={`dashboard.prices.item.${i + 1}`}
+                      className="flex items-center justify-between rounded-lg px-3 py-2 transition-smooth hover:bg-muted/50"
+                    >
+                      <span className="font-mono text-sm font-semibold text-foreground">
+                        {t.symbol}
+                      </span>
+                      <span className="text-right">
+                        <span className="block font-mono text-sm text-foreground">
+                          {formatPrice(price.usd)}
+                        </span>
+                        <span
+                          className={cn(
+                            "block font-mono text-xs",
+                            trendClass(price.change24h),
+                          )}
+                        >
+                          {signed(price.change24h, 2)}
+                        </span>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </Panel>
+      </div>
+
+      {/* Top APY + movers */}
+      <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-2">
+        <Panel ocid="dashboard.top_apy.panel">
           <div className="p-4 pb-2">
             <SectionHeading
-              icon={Zap}
-              label="Portfolio Allocation"
-              iconColor="#f59e0b"
-            />
-            <p className="text-xs mt-0.5" style={{ color: "#909090" }}>
-              Your positions by protocol
-            </p>
-          </div>
-          <div className="px-4 pb-4">
-            {loading ? (
-              <div data-ocid="dashboard.portfolio_chart.loading_state">
-                <div
-                  className="h-32 w-32 mx-auto rounded-full animate-pulse mt-2"
-                  style={{ background: "rgba(0,163,255,0.05)" }}
+              icon={Trophy}
+              label="Top 5 by APY"
+              badge={demoBadge}
+              action={
+                <ViewAllLink
+                  to="/pools"
+                  ocid="dashboard.top_apy.view_all_link"
                 />
-                <div className="grid grid-cols-2 gap-2 mt-4">
-                  {[1, 2, 3].map((i) => (
-                    <GlassSkeleton key={i} className="h-4" />
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <>
-                <ResponsiveContainer width="100%" height={130}>
-                  <PieChart>
-                    <Pie
-                      data={portfolioAllocation}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={38}
-                      outerRadius={58}
-                      paddingAngle={3}
-                      dataKey="value"
-                      strokeWidth={0}
-                    >
-                      {portfolioAllocation.map((entry) => (
-                        <Cell
-                          key={entry.name}
-                          fill={entry.color}
-                          style={{
-                            filter: `drop-shadow(0 0 4px ${entry.color}80)`,
-                          }}
-                        />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={GLASS_TOOLTIP_STYLE}
-                      formatter={(v: number) => [formatUSD(v), "Value"]}
-                      itemStyle={{ color: NEON_GREEN }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-                <PieLegend data={portfolioAllocation} />
-                <div className="mt-3">
-                  <DataSourceBadge
-                    source="KongSwap"
-                    lastUpdated={LAST_UPDATED}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-        </GlassCard>
-      </div>
-
-      {/* ── Top APY Pools + Market Movers ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
-        {/* Top 5 by APY */}
-        <GlassCard>
-          <div className="p-4 pb-2">
-            <div className="flex items-center justify-between">
-              <SectionHeading
-                icon={Trophy}
-                label="Top 5 by APY"
-                iconColor="#f59e0b"
-              />
-              <Link
-                to="/pools"
-                data-ocid="dashboard.top_apy.view_all_link"
-                className="text-xs font-mono flex items-center gap-0.5 transition-all duration-200"
-                style={{ color: ELECTRIC_BLUE }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLAnchorElement).style.textShadow =
-                    `0 0 8px ${ELECTRIC_BLUE}80`;
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLAnchorElement).style.textShadow =
-                    "none";
-                }}
-              >
-                View all <ArrowUpRight className="w-3 h-3" />
-              </Link>
-            </div>
+              }
+            />
           </div>
           <div className="px-2 pb-3">
-            {loading ? (
-              <div
-                data-ocid="dashboard.top_apy.loading_state"
-                className="space-y-2 px-2"
-              >
-                {[1, 2, 3, 4, 5].map((i) => (
-                  <GlassSkeleton key={i} className="h-12" />
-                ))}
-              </div>
-            ) : (
+            {pools.isLoading && (
+              <LoadingState label="Loading pools…" className="m-2 py-8" />
+            )}
+            {topAPYPools.length > 0 && (
               <div data-ocid="dashboard.top_apy.list">
                 {topAPYPools.map((pool, i) => (
-                  <TopAPYPoolRow key={pool.id} pool={pool} rank={i + 1} />
+                  <TopAPYPoolRow
+                    key={pool.id}
+                    pool={pool}
+                    rank={i + 1}
+                    history={
+                      pool.id === topTvlPool?.id ? history.data : undefined
+                    }
+                  />
                 ))}
               </div>
             )}
           </div>
-        </GlassCard>
+        </Panel>
 
-        {/* Market Movers */}
-        <GlassCard>
+        <Panel ocid="dashboard.movers.panel">
           <div className="p-4 pb-2">
-            <SectionHeading icon={Activity} label="Market Movers" />
+            <SectionHeading
+              icon={Activity}
+              label="Biggest movers · 24h APY"
+              badge={demoBadge}
+            />
           </div>
           <div className="px-2 pb-3">
-            {loading ? (
-              <div
-                data-ocid="dashboard.movers.loading_state"
-                className="space-y-2 px-2"
-              >
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
-                  <GlassSkeleton key={i} className="h-9" />
-                ))}
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
-                <div>
-                  <p
-                    className="text-[10px] font-bold uppercase tracking-[1.5px] font-mono px-3 pb-1 flex items-center gap-1"
-                    style={{ color: NEON_GREEN }}
-                  >
-                    <TrendingUp className="w-3 h-3" /> Top Gainers
-                  </p>
-                  {gainers.map((pool, i) => (
-                    <MarketMoverRow
-                      key={pool.id}
-                      pool={pool}
-                      rank={i + 1}
-                      type="gainer"
-                    />
-                  ))}
-                </div>
-                <div>
-                  <p
-                    className="text-[10px] font-bold uppercase tracking-[1.5px] font-mono px-3 pb-1 flex items-center gap-1"
-                    style={{ color: DANGER_RED }}
-                  >
-                    <TrendingDown className="w-3 h-3" /> Top Losers
-                  </p>
-                  {losers.map((pool, i) => (
-                    <MarketMoverRow
-                      key={pool.id}
-                      pool={pool}
-                      rank={i + 1}
-                      type="loser"
-                    />
-                  ))}
-                </div>
+            {pools.isLoading && (
+              <LoadingState label="Loading movers…" className="m-2 py-8" />
+            )}
+            {pools.data.length > 0 && (
+              <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                <MoverColumn
+                  title="Top gainers"
+                  pools={gainers}
+                  type="gainer"
+                />
+                <MoverColumn title="Top losers" pools={losers} type="loser" />
               </div>
             )}
           </div>
-        </GlassCard>
+        </Panel>
       </div>
 
-      {/* ── Active Positions ── */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Activity
-              className="w-3.5 h-3.5"
-              style={{ color: ELECTRIC_BLUE }}
-            />
-            <span
-              className="text-xl font-semibold"
-              style={{ color: "#e0e0e0" }}
-            >
-              Active Positions
-            </span>
-            <div
-              className="h-px w-12"
-              style={{
-                background: `linear-gradient(to right, ${ELECTRIC_BLUE}40, transparent)`,
+      {/* Positions preview */}
+      <Panel ocid="dashboard.positions.panel">
+        <div className="space-y-1 p-4 pb-2">
+          <SectionHeading
+            icon={Activity}
+            label="My positions"
+            badge={
+              isAuthenticated && positionRows.length > 0 ? demoBadge : null
+            }
+            action={
+              <ViewAllLink
+                to="/position-tracker"
+                ocid="dashboard.positions.view_all_link"
+              />
+            }
+          />
+          {isAuthenticated && positionRows.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Estimated total{" "}
+              <span className="font-mono font-semibold text-primary">
+                {formatUSD(positionsTotal)}
+              </span>{" "}
+              across {positionRows.length} saved position
+              {positionRows.length === 1 ? "" : "s"}. Estimates grow the entry
+              amount at each pool&apos;s current APY.
+            </p>
+          )}
+        </div>
+        <div className="space-y-2 p-4 pt-2">
+          {!isInitializing && !isAuthenticated && (
+            <SignInPrompt feature="your positions" />
+          )}
+          {isAuthenticated && positionsLoading && (
+            <LoadingState label="Loading your positions…" className="py-8" />
+          )}
+          {isInitializing && (
+            <LoadingState label="Checking your session…" className="py-8" />
+          )}
+          {isAuthenticated && positions.isError && (
+            <ErrorState
+              title="Could not load your positions"
+              onRetry={() => {
+                void positions.refetch();
               }}
             />
-          </div>
-          <Link
-            to="/pools"
-            data-ocid="dashboard.positions.view_all_link"
-            className="text-xs font-mono flex items-center gap-0.5 transition-all duration-200"
-            style={{ color: ELECTRIC_BLUE }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLAnchorElement).style.textShadow =
-                `0 0 8px ${ELECTRIC_BLUE}80`;
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLAnchorElement).style.textShadow = "none";
-            }}
-          >
-            View all <ArrowUpRight className="w-3 h-3" />
-          </Link>
-        </div>
-        {loading ? (
-          <div
-            data-ocid="dashboard.positions.loading_state"
-            className="space-y-2"
-          >
-            {[1, 2, 3].map((i) => (
-              <GlassSkeleton key={i} className="h-16" />
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {MOCK_POSITIONS.slice(0, 3).map((entry, i) => (
-              <div
-                key={entry.position.id}
-                data-ocid={`dashboard.position.${i + 1}`}
-                className="rounded-xl p-3 sm:p-4 transition-all duration-300 cursor-default"
-                style={{
-                  background: "rgba(13,13,13,0.8)",
-                  border: "1px solid rgba(0,163,255,0.12)",
-                  backdropFilter: "blur(10px)",
-                }}
-                onMouseEnter={(e) => {
-                  const el = e.currentTarget as HTMLDivElement;
-                  el.style.borderColor = `${ELECTRIC_BLUE}35`;
-                  el.style.transform = "translateY(-1px)";
-                  el.style.boxShadow = `0 0 20px ${ELECTRIC_BLUE}10, 0 4px 12px rgba(0,0,0,0.2)`;
-                }}
-                onMouseLeave={(e) => {
-                  const el = e.currentTarget as HTMLDivElement;
-                  el.style.borderColor = "rgba(0,163,255,0.12)";
-                  el.style.transform = "";
-                  el.style.boxShadow = "";
-                }}
-              >
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <ProtocolBadge
-                      protocol={entry.position.protocol}
-                      size="sm"
-                    />
+          )}
+          {isAuthenticated &&
+            !positionsLoading &&
+            !positions.isError &&
+            positionRows.length === 0 && (
+              <EmptyState
+                title="No saved positions yet"
+                description="Add a position in the tracker to see its estimated value here."
+                icon={<Droplets className="h-5 w-5" aria-hidden />}
+                action={
+                  <Button
+                    asChild
+                    size="sm"
+                    data-ocid="dashboard.positions.add_button"
+                  >
+                    <Link to="/position-tracker">Add a position</Link>
+                  </Button>
+                }
+              />
+            )}
+          {isAuthenticated &&
+            positionRows.slice(0, 3).map(({ pos, pool, estimated }, i) => {
+              const gain = estimated - pos.amountUsd;
+              return (
+                <div
+                  key={pos.id.toString()}
+                  data-ocid={`dashboard.position.${i + 1}`}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3 transition-smooth hover:border-primary/40"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    {pool && (
+                      <ProtocolBadge protocol={pool.protocol} size="sm" />
+                    )}
                     <div className="min-w-0">
-                      <p
-                        className="font-medium text-sm truncate"
-                        style={{ color: "#e0e0e0" }}
-                      >
-                        {entry.position.poolName}
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {pos.displayName}
                       </p>
-                      <p className="text-xs" style={{ color: "#909090" }}>
-                        {entry.position.token0Symbol}/
-                        {entry.position.token1Symbol}
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {pos.symbol}
+                        {pool
+                          ? ` · ${pool.apy.current.toFixed(1)}% APY`
+                          : " · pool not in feed"}
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4 sm:gap-6 text-sm flex-shrink-0">
-                    <div className="text-right">
-                      <p
-                        className="text-[10px] uppercase tracking-wide font-mono"
-                        style={{ color: "#909090" }}
-                      >
-                        Value
+                  <div className="flex flex-shrink-0 items-center gap-5 text-right">
+                    <div>
+                      <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Invested
                       </p>
-                      <p
-                        className={cn(
-                          "font-mono font-semibold transition-all duration-300",
-                          dataVisible ? "opacity-100" : "opacity-0",
-                        )}
-                        style={{
-                          color: ELECTRIC_BLUE,
-                          textShadow: `0 0 8px ${ELECTRIC_BLUE}60`,
-                        }}
-                      >
-                        {formatUSD(entry.position.currentValueUSD)}
+                      <p className="font-mono text-sm text-foreground">
+                        {formatUSD(pos.amountUsd)}
                       </p>
                     </div>
-                    <div className="text-right">
-                      <p
-                        className="text-[10px] uppercase tracking-wide font-mono"
-                        style={{ color: "#909090" }}
-                      >
-                        P&amp;L
+                    <div>
+                      <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Est. value
                       </p>
-                      <p
-                        className={cn(
-                          "font-mono font-semibold transition-all duration-300",
-                          dataVisible ? "opacity-100" : "opacity-0",
-                        )}
-                        style={{
-                          color: entry.isProfit ? NEON_GREEN : DANGER_RED,
-                          textShadow: entry.isProfit
-                            ? `0 0 8px ${NEON_GREEN}60`
-                            : `0 0 8px ${DANGER_RED}60`,
-                        }}
-                      >
-                        {entry.isProfit ? "+" : ""}
-                        {formatUSD(entry.netPnL)}
+                      <p className="primary-glow font-mono text-sm">
+                        {formatUSD(estimated)}
                       </p>
                     </div>
-                    <div className="text-right hidden sm:block">
-                      <p
-                        className="text-[10px] uppercase tracking-wide font-mono"
-                        style={{ color: "#909090" }}
-                      >
-                        IL
+                    <div className="hidden sm:block">
+                      <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Est. yield
                       </p>
-                      <p className="font-mono" style={{ color: "#f59e0b" }}>
-                        {entry.position.ilPercent.toFixed(1)}%
-                      </p>
-                    </div>
-                    <div className="text-right hidden sm:block">
-                      <p
-                        className="text-[10px] uppercase tracking-wide font-mono"
-                        style={{ color: "#909090" }}
-                      >
-                        Fees
-                      </p>
-                      <p
-                        className="font-mono"
-                        style={{
-                          color: NEON_GREEN,
-                          textShadow: `0 0 6px ${NEON_GREEN}50`,
-                        }}
-                      >
-                        +{formatUSD(entry.position.feesEarned)}
+                      <p className={cn("font-mono text-sm", trendClass(gain))}>
+                        {gain >= 0 ? "+" : ""}
+                        {formatUSD(gain)}
                       </p>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              );
+            })}
+        </div>
+      </Panel>
     </div>
   );
 }
+
+export default DashboardPage;

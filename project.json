@@ -1,27 +1,18 @@
 {
-  "overview": "Premium DeFi liquidity pool analytics dashboard supporting Uniswap, PancakeSwap, Raydium, ICP, ICPswap, and KongSwap protocols. Features a Bloomberg Terminal-inspired dark theme with advanced analytics, real-time tracking, and cross-chain comparison. Now includes a dedicated Derivatives page with live funding rate trackers, open interest charts, and long/short ratio panels powered by real Binance public APIs.",
+  "overview": "A DeFi pool analytics dashboard with a new Yield Farming page that lists reward-paying pools and estimates deposit earnings.",
   "features": [
-    "Live funding rate tracker with Binance API integration",
-    "Open interest charts with historical trends",
-    "Long/short ratio panels with interactive time period selection",
-    "Pool comparison with watchlist and price alerts",
-    "Position tracker with ICPswap/KongSwap API integration",
-    "Impermanent loss calculator with ICP principal support",
-    "AI Assistant with decision history and performance tracker",
-    "CSV/PDF export for tables",
-    "Real-time notification system",
-    "Glassmorphism dark theme with glowing effects"
+    "Yield Farming page listing pools that pay reward incentives",
+    "Base, reward and total APY with reward share and risk score per farm",
+    "Search, filter by chain, minimum TVL and stablecoin-only, and sort, shareable through the page link",
+    "Earnings estimator showing daily, monthly and yearly projections",
+    "Visible Demo data label on fallback data"
   ],
-  "category": "finance",
+  "category": "defi-analytics-dashboard",
   "tags": [
     "defi",
+    "yield-farming",
     "analytics",
-    "derivatives",
-    "liquidity-pools",
-    "cryptocurrency",
-    "uniswap",
-    "icp",
-    "blockchain"
+    "dashboard"
   ],
-  "last_updated": "2026-05-05T23:52:28.238Z"
+  "last_updated": "2026-11-04T17:57:38.825Z"
 }

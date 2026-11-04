@@ -1,10 +1,17 @@
+import { FallbackUI } from "@/components/ErrorBoundary";
 import { Layout } from "@/components/Layout";
+import { NotFound } from "@/components/NotFound";
 import { APYTrackerPage } from "@/pages/APYTracker";
+import { AlertsPage } from "@/pages/Alerts";
 import { DashboardPage } from "@/pages/Dashboard";
 import { DerivativesPage } from "@/pages/Derivatives";
 import { ILCalculatorPage } from "@/pages/ILCalculator";
 import { PoolComparisonPage } from "@/pages/PoolComparison";
 import { PoolsPage } from "@/pages/Pools";
+import { PortfolioPage } from "@/pages/Portfolio";
+import { PositionTrackerPage } from "@/pages/PositionTracker";
+import { SettingsPage } from "@/pages/Settings";
+import { YieldFarmingPage } from "@/pages/YieldFarming";
 import {
   Outlet,
   RouterProvider,
@@ -12,6 +19,7 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -19,46 +27,28 @@ const rootRoute = createRootRoute({
       <Outlet />
     </Layout>
   ),
+  notFoundComponent: NotFound,
+  errorComponent: ({ error, reset }) => (
+    <FallbackUI error={error} onRetry={reset} />
+  ),
 });
 
-const dashboardRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: DashboardPage,
-});
-const poolsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/pools",
-  component: PoolsPage,
-});
-const apyRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/apy-tracker",
-  component: APYTrackerPage,
-});
-const ilRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/il-calculator",
-  component: ILCalculatorPage,
-});
-const comparisonRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/pool-comparison",
-  component: PoolComparisonPage,
-});
-const derivativesRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/derivatives",
-  component: DerivativesPage,
-});
+function page<const P extends string>(path: P, component: () => ReactNode) {
+  return createRoute({ getParentRoute: () => rootRoute, path, component });
+}
 
 const routeTree = rootRoute.addChildren([
-  dashboardRoute,
-  poolsRoute,
-  apyRoute,
-  ilRoute,
-  comparisonRoute,
-  derivativesRoute,
+  page("/", DashboardPage),
+  page("/pools", PoolsPage),
+  page("/apy-tracker", APYTrackerPage),
+  page("/il-calculator", ILCalculatorPage),
+  page("/pool-comparison", PoolComparisonPage),
+  page("/derivatives", DerivativesPage),
+  page("/position-tracker", PositionTrackerPage),
+  page("/alerts", AlertsPage),
+  page("/portfolio", PortfolioPage),
+  page("/yield-farming", YieldFarmingPage),
+  page("/settings", SettingsPage),
 ]);
 const router = createRouter({ routeTree });
 

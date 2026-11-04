@@ -189,90 +189,12 @@ export const SkeletonTable = React.memo(function SkeletonTable({
   );
 });
 
-/**
- * Per-source skeleton: shows the protocol name header + 3 shimmer data rows.
- * Used when loading live pool data independently per protocol.
- */
-export const PoolSourceSkeleton = React.memo(function PoolSourceSkeleton({
-  protocolName,
-}: { protocolName: string }) {
-  return (
-    <div
-      style={{
-        borderRadius: 12,
-        border: "1px solid rgba(0,163,255,0.10)",
-        background: "rgba(0,163,255,0.03)",
-        padding: 16,
-        marginBottom: 8,
-      }}
-    >
-      {/* Protocol label row */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: 12,
-        }}
-      >
-        <Skel
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: "50%",
-            animationDelay: "0s",
-          }}
-        />
-        <div
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            color: "rgba(0,163,255,0.55)",
-          }}
-        >
-          {protocolName}
-        </div>
-        <Skel
-          style={{
-            marginLeft: "auto",
-            height: 18,
-            width: 48,
-            borderRadius: 20,
-            animationDelay: "0.05s",
-          }}
-        />
-      </div>
-
-      {/* 3 shimmer data rows */}
-      {[0, 1, 2].map((i) => (
-        <div
-          key={i}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "2fr 1fr 1fr 1fr",
-            gap: 12,
-            padding: "10px 0",
-            borderTop: i > 0 ? "1px solid rgba(0,163,255,0.05)" : undefined,
-          }}
-        >
-          <Skel style={{ height: 14, animationDelay: `${i * 0.08}s` }} />
-          <Skel style={{ height: 14, animationDelay: `${0.04 + i * 0.08}s` }} />
-          <Skel style={{ height: 14, animationDelay: `${0.08 + i * 0.08}s` }} />
-          <Skel style={{ height: 14, animationDelay: `${0.12 + i * 0.08}s` }} />
-        </div>
-      ))}
-    </div>
-  );
-});
-
 export const SkeletonChart = React.memo(function SkeletonChart() {
   const bars = React.useMemo(
     () =>
       Array.from({ length: 20 }, (_, i) => ({
         id: `bar-${i}`,
-        h: 30 + Math.random() * 60,
+        h: 30 + ((i * 37 + 11) % 60),
       })),
     [],
   );

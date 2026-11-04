@@ -1,5 +1,4 @@
-import { Breadcrumb } from "@/components/Breadcrumb";
-import { HELP_TERMS, HelpIcon } from "@/components/HelpIcon";
+import { ErrorState, LoadingState } from "@/components/DataStates";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,18 +10,20 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useTokenPrices } from "@/hooks/useLiveData";
+import { cn } from "@/lib/utils";
 import type { ILCalculatorInput, ILCalculatorResult } from "@/types/defi";
+import { useIsFetching } from "@tanstack/react-query";
 import {
   AlertCircle,
   Calculator,
-  CheckCircle2,
   Info,
-  KeyRound,
+  Radio,
   TrendingDown,
   TrendingUp,
   Zap,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -43,11 +44,32 @@ const FEE_TIERS = [
   { value: "1.00", label: "1.00% — Exotic pairs" },
 ];
 
+/** Assumed daily trading volume as a share of the liquidity provided. */
+const DAILY_VOLUME_RATIO = 0.5;
+
+/** Token symbols the live price action can resolve to CoinGecko coin ids. */
+const COIN_IDS: Record<string, string> = {
+  ETH: "ethereum",
+  WETH: "ethereum",
+  BTC: "bitcoin",
+  WBTC: "bitcoin",
+  CKBTC: "bitcoin",
+  SOL: "solana",
+  ICP: "internet-computer",
+  BNB: "binancecoin",
+  USDC: "usd-coin",
+  USDT: "tether",
+  UNI: "uniswap",
+  CAKE: "pancakeswap-token",
+  RAY: "raydium",
+};
+
+const SUPPORTED_SYMBOLS = Object.keys(COIN_IDS).join(", ");
+
 const PRESETS = [
   {
     id: "eth-usdc",
     label: "ETH/USDC 50/50",
-    description: "Classic stablecoin pair",
     values: {
       token0Name: "ETH",
       token1Name: "USDC",
@@ -63,7 +85,6 @@ const PRESETS = [
   {
     id: "btc-eth",
     label: "BTC/ETH",
-    description: "Correlated volatile pair",
     values: {
       token0Name: "WBTC",
       token1Name: "ETH",
@@ -79,7 +100,6 @@ const PRESETS = [
   {
     id: "sol-usdc",
     label: "SOL/USDC",
-    description: "High-volatility pair",
     values: {
       token0Name: "SOL",
       token1Name: "USDC",
@@ -88,14 +108,13 @@ const PRESETS = [
       token1InitialPrice: 1,
       token1CurrentPrice: 1,
       initialLiquidity: 5000,
-      feeTier: "0.25",
+      feeTier: "0.30",
       daysInPool: 7,
     },
   },
   {
     id: "icp-ckbtc",
     label: "ICP/ckBTC",
-    description: "ICP Principal pair",
     values: {
       token0Name: "ICP",
       token1Name: "ckBTC",
@@ -111,7 +130,6 @@ const PRESETS = [
   {
     id: "uni-usdc",
     label: "UNI/USDC",
-    description: "Uniswap governance token",
     values: {
       token0Name: "UNI",
       token1Name: "USDC",
@@ -127,7 +145,6 @@ const PRESETS = [
   {
     id: "cake-bnb",
     label: "CAKE/BNB",
-    description: "PancakeSwap native pair",
     values: {
       token0Name: "CAKE",
       token1Name: "BNB",
@@ -136,14 +153,13 @@ const PRESETS = [
       token1InitialPrice: 580,
       token1CurrentPrice: 640,
       initialLiquidity: 6000,
-      feeTier: "0.25",
+      feeTier: "0.30",
       daysInPool: 30,
     },
   },
   {
     id: "ray-sol",
     label: "RAY/SOL",
-    description: "Raydium liquidity pair",
     values: {
       token0Name: "RAY",
       token1Name: "SOL",
@@ -152,7 +168,7 @@ const PRESETS = [
       token1InitialPrice: 148,
       token1CurrentPrice: 185,
       initialLiquidity: 4000,
-      feeTier: "0.25",
+      feeTier: "0.30",
       daysInPool: 7,
     },
   },
@@ -165,50 +181,26 @@ interface CalcInput extends ILCalculatorInput {
 }
 
 function calculateIL(input: CalcInput): ILCalculatorResult {
-  const {
-    token0PriceEntry,
-    token0PriceCurrent,
-    token1PriceEntry,
-    token1PriceCurrent,
-  } = input;
-
-  const priceRatioEntry = token0PriceEntry / token1PriceEntry;
-  const priceRatioCurrent = token0PriceCurrent / token1PriceCurrent;
-  const k = priceRatioCurrent / priceRatioEntry;
+  const r0 = input.token0PriceCurrent / input.token0PriceEntry;
+  const r1 = input.token1PriceCurrent / input.token1PriceEntry;
+  const k = r0 / r1;
 
   // IL formula: 2*sqrt(k)/(1+k) - 1
   const ilFactor = (2 * Math.sqrt(k)) / (1 + k) - 1;
-  const ilPercent = ilFactor * 100;
 
-  // HODL value: hold both tokens at 50/50 entry split
-  const hodlValue =
-    input.initialLiquidity * 0.5 * (token0PriceCurrent / token0PriceEntry) +
-    input.initialLiquidity * 0.5 * (token1PriceCurrent / token1PriceEntry);
-
-  // Pool value after IL
-  const poolValue =
-    input.initialLiquidity *
-    (1 + ilFactor) *
-    Math.sqrt(
-      (token0PriceCurrent / token0PriceEntry) *
-        (token1PriceCurrent / token1PriceEntry),
-    );
-
+  // HODL value: hold both tokens at the 50/50 entry split
+  const hodlValue = input.initialLiquidity * 0.5 * (r0 + r1);
+  const poolValue = hodlValue * (1 + ilFactor);
   const ilUSD = Math.max(0, hodlValue - poolValue);
 
-  // Estimated fees: use fee rate and volume approximation
-  const annualFeeAPY = input.feeRate * 365 * 0.5;
-  const dailyFeeRate = annualFeeAPY / 365 / 100;
-  const feesEarned = input.initialLiquidity * dailyFeeRate * input.daysInPool;
-
+  const dailyFees = input.initialLiquidity * input.feeRate * DAILY_VOLUME_RATIO;
+  const feesEarned = dailyFees * input.daysInPool;
   const netPnL = feesEarned - ilUSD;
   const breakEvenDays =
-    ilUSD > 0 && dailyFeeRate > 0
-      ? Math.ceil(ilUSD / (input.initialLiquidity * dailyFeeRate))
-      : 0;
+    ilUSD > 0 && dailyFees > 0 ? Math.ceil(ilUSD / dailyFees) : 0;
 
   return {
-    ilPercent: Math.abs(ilPercent),
+    ilPercent: Math.abs(ilFactor * 100),
     ilUSD,
     hodlValue,
     poolValue,
@@ -230,7 +222,6 @@ interface FormValues {
   initialLiquidity: string;
   feeTier: string;
   daysInPool: string;
-  icpPrincipal: string;
 }
 
 const DEFAULT_FORM: FormValues = {
@@ -243,130 +234,102 @@ const DEFAULT_FORM: FormValues = {
   initialLiquidity: "",
   feeTier: "0.30",
   daysInPool: "",
-  icpPrincipal: "",
 };
 
-// ─── Glass card style helper ──────────────────────────────────────────────────
+const LIVE_FIELDS: ReadonlyArray<keyof FormValues> = [
+  "token0Name",
+  "token1Name",
+  "token0InitialPrice",
+  "token0CurrentPrice",
+  "token1InitialPrice",
+  "token1CurrentPrice",
+];
 
-const glassCard: React.CSSProperties = {
-  background: "rgba(13,13,13,0.85)",
-  border: "1px solid rgba(0,163,255,0.18)",
-  backdropFilter: "blur(10px)",
-  boxShadow: "0 0 24px rgba(0,163,255,0.06), 0 8px 32px rgba(0,0,0,0.4)",
+interface LiveTarget {
+  symbol0: string;
+  symbol1: string;
+  id0: string;
+  id1: string;
+}
+
+interface LiveInfo {
+  symbol0: string;
+  symbol1: string;
+  at: Date;
+}
+
+function parseNum(value: string): number {
+  return value.trim() === "" ? Number.NaN : Number(value);
+}
+
+function formatPrice(value: number): string {
+  return String(Number(value.toPrecision(6)));
+}
+
+const fmtUsd = (value: number) =>
+  value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+// ─── Shared styles ────────────────────────────────────────────────────────────
+
+const panelClass = "overflow-hidden rounded-xl border border-border bg-card";
+const panelHeaderClass = "border-b border-border px-5 py-4";
+const panelTitleClass =
+  "text-sm font-semibold uppercase tracking-widest text-foreground";
+const fieldLabelClass =
+  "block text-xs font-medium uppercase tracking-widest text-muted-foreground";
+const fieldInputClass = "font-mono text-sm";
+
+const BAR_FILL: Record<string, string> = {
+  "Fees Earned": "fill-accent",
+  "IL Loss": "fill-primary",
 };
 
-const inputStyle: React.CSSProperties = {
-  background: "rgba(13,13,13,0.9)",
-  border: "1px solid rgba(0,163,255,0.18)",
-  color: "#e0e0e0",
-  outline: "none",
-  transition: "border-color 0.2s, box-shadow 0.2s",
-};
-
-// ─── Custom Tooltip ───────────────────────────────────────────────────────────
+// ─── Chart tooltip ────────────────────────────────────────────────────────────
 
 function ChartTooltip({
   active,
   payload,
-  hodlValue,
-  poolValue,
 }: {
   active?: boolean;
-  payload?: Array<{ name: string; value: number; fill: string }>;
-  hodlValue?: number;
-  poolValue?: number;
+  payload?: Array<{ name: string; value: number }>;
 }) {
   if (!active || !payload?.length) return null;
-  const entry = payload[0];
-  const isHodl =
-    entry.name === "Fees Earned" ? false : entry.name === "IL Loss";
-  // Compute percentage difference vs the other bar
-  const otherVal = entry.name === "HODL Value" ? poolValue : hodlValue;
-  const pct =
-    otherVal && otherVal !== 0
-      ? (((entry.value - otherVal) / Math.abs(otherVal)) * 100).toFixed(1)
-      : null;
-  void isHodl;
+  const isFees = payload[0].name === "Fees Earned";
   return (
-    <div
-      className="rounded-lg p-3 min-w-[160px]"
-      style={{
-        background: "rgba(0,0,0,0.82)",
-        border: "1px solid rgba(0,163,255,0.3)",
-        backdropFilter: "blur(12px)",
-        boxShadow: "0 0 16px rgba(0,163,255,0.15), 0 8px 24px rgba(0,0,0,0.5)",
-      }}
-    >
-      <p
-        className="font-mono text-xs font-semibold tracking-wider uppercase mb-1.5"
-        style={{ color: "#909090" }}
-      >
-        {entry.name}
+    <div className="rounded-lg border border-border bg-popover p-3 shadow-elevated">
+      <p className="font-mono text-sm font-semibold tracking-wide text-popover-foreground">
+        {payload[0].name}
       </p>
       <p
-        className="font-mono text-sm font-bold"
-        style={{
-          color: entry.fill,
-          textShadow: `0 0 8px ${entry.fill}99`,
-        }}
+        className={cn(
+          "font-mono text-sm",
+          isFees ? "text-accent" : "text-primary",
+        )}
       >
-        $
-        {Math.abs(entry.value).toLocaleString("en-US", {
-          maximumFractionDigits: 2,
-        })}
+        ${fmtUsd(Math.abs(payload[0].value))}
       </p>
-      {pct !== null && (
-        <p
-          className="mt-1 text-xs font-mono"
-          style={{ color: Number(pct) >= 0 ? "#00FF88" : "#ff4466" }}
-        >
-          {Number(pct) >= 0 ? "+" : ""}
-          {pct}% vs other
-        </p>
-      )}
     </div>
   );
 }
 
-// ─── GlowInput: input with electric blue focus glow ──────────────────────────
+// ─── Field helper ─────────────────────────────────────────────────────────────
 
-function GlowInput({
+function Field({
   id,
-  type,
-  placeholder,
-  value,
-  onChange,
-  "data-ocid": dataOcid,
-  className,
+  label,
+  children,
 }: {
-  id?: string;
-  type?: string;
-  placeholder?: string;
-  value: string;
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  "data-ocid"?: string;
-  className?: string;
+  id: string;
+  label: string;
+  children: React.ReactNode;
 }) {
-  const [focused, setFocused] = useState(false);
   return (
-    <input
-      id={id}
-      type={type}
-      placeholder={placeholder}
-      value={value}
-      onChange={onChange}
-      data-ocid={dataOcid}
-      className={`rounded-lg px-3 py-2.5 w-full text-sm font-mono transition-smooth placeholder:text-[#444] ${className ?? ""}`}
-      style={{
-        ...inputStyle,
-        borderColor: focused ? "rgba(0,163,255,0.6)" : "rgba(0,163,255,0.18)",
-        boxShadow: focused
-          ? "0 0 0 2px rgba(0,163,255,0.12), 0 0 12px rgba(0,163,255,0.1)"
-          : "none",
-      }}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-    />
+    <div className="space-y-1.5">
+      <Label htmlFor={id} className={fieldLabelClass}>
+        {label}
+      </Label>
+      {children}
+    </div>
   );
 }
 
@@ -377,137 +340,168 @@ export function ILCalculatorPage() {
   const [result, setResult] = useState<ILCalculatorResult | null>(null);
   const [activePreset, setActivePreset] = useState<string | null>(null);
   const [showFormula, setShowFormula] = useState(false);
+  const [target, setTarget] = useState<LiveTarget | null>(null);
+  const [pendingApply, setPendingApply] = useState(false);
+  const [liveInfo, setLiveInfo] = useState<LiveInfo | null>(null);
+  const [liveIssue, setLiveIssue] = useState<string | null>(null);
   const isMobile = useIsMobile();
+
+  const prices = useTokenPrices(target ? [target.id0, target.id1] : []);
+  const fetchingPrices =
+    useIsFetching({ queryKey: ["token-prices"] }) > 0 && target !== null;
+  const liveLoading = target !== null && (prices.isLoading || fetchingPrices);
+  const liveFailed = target !== null && !liveLoading && prices.isError;
+
+  const { data: priceData, isError: priceError } = prices;
+
+  // Apply fetched prices to the form once they arrive for a pending request.
+  useEffect(() => {
+    if (!pendingApply || !target || liveLoading || priceError) return;
+    const p0 = priceData[target.id0];
+    const p1 = priceData[target.id1];
+    setPendingApply(false);
+    if (!p0 || !p1) {
+      setLiveIssue(
+        "CoinGecko returned no price for one of the tokens. Enter prices manually.",
+      );
+      return;
+    }
+    const entryOf = (usd: number, change: number) =>
+      change > -99.9 ? usd / (1 + change / 100) : usd;
+    setForm((prev) => ({
+      ...prev,
+      token0Name: target.symbol0,
+      token1Name: target.symbol1,
+      token0CurrentPrice: formatPrice(p0.usd),
+      token0InitialPrice: formatPrice(entryOf(p0.usd, p0.change24h)),
+      token1CurrentPrice: formatPrice(p1.usd),
+      token1InitialPrice: formatPrice(entryOf(p1.usd, p1.change24h)),
+    }));
+    setLiveInfo({
+      symbol0: target.symbol0,
+      symbol1: target.symbol1,
+      at: new Date(),
+    });
+    setResult(null);
+  }, [pendingApply, target, liveLoading, priceError, priceData]);
+
+  const resetLive = () => {
+    setTarget(null);
+    setPendingApply(false);
+    setLiveInfo(null);
+    setLiveIssue(null);
+  };
 
   const setField = (field: keyof FormValues, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     setActivePreset(null);
     setResult(null);
+    if (LIVE_FIELDS.includes(field)) resetLive();
   };
 
   const applyPreset = (presetId: string) => {
     const preset = PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
+    const v = preset.values;
     setForm({
-      token0Name: preset.values.token0Name,
-      token1Name: preset.values.token1Name,
-      token0InitialPrice: String(preset.values.token0InitialPrice),
-      token0CurrentPrice: String(preset.values.token0CurrentPrice),
-      token1InitialPrice: String(preset.values.token1InitialPrice),
-      token1CurrentPrice: String(preset.values.token1CurrentPrice),
-      initialLiquidity: String(preset.values.initialLiquidity),
-      feeTier: preset.values.feeTier,
-      daysInPool: String(preset.values.daysInPool),
-      icpPrincipal: form.icpPrincipal,
+      token0Name: v.token0Name,
+      token1Name: v.token1Name,
+      token0InitialPrice: String(v.token0InitialPrice),
+      token0CurrentPrice: String(v.token0CurrentPrice),
+      token1InitialPrice: String(v.token1InitialPrice),
+      token1CurrentPrice: String(v.token1CurrentPrice),
+      initialLiquidity: String(v.initialLiquidity),
+      feeTier: v.feeTier,
+      daysInPool: String(v.daysInPool),
     });
     setActivePreset(presetId);
     setResult(null);
+    resetLive();
+  };
+
+  const handleUseLivePrices = () => {
+    const symbol0 = form.token0Name.trim().toUpperCase() || "ETH";
+    const symbol1 = form.token1Name.trim().toUpperCase() || "USDC";
+    const id0 = COIN_IDS[symbol0];
+    const id1 = COIN_IDS[symbol1];
+    setLiveInfo(null);
+    if (!id0 || !id1) {
+      const unknown = [!id0 && symbol0, !id1 && symbol1]
+        .filter(Boolean)
+        .join(", ");
+      setTarget(null);
+      setPendingApply(false);
+      setLiveIssue(
+        `No live price source for ${unknown}. Supported: ${SUPPORTED_SYMBOLS}. You can still type prices manually.`,
+      );
+      return;
+    }
+    setLiveIssue(null);
+    setPendingApply(true);
+    setActivePreset(null);
+    const same = target?.id0 === id0 && target?.id1 === id1;
+    setTarget({ symbol0, symbol1, id0, id1 });
+    if (same) prices.refetch();
+  };
+
+  const handleRetry = () => {
+    setPendingApply(true);
+    prices.refetch();
   };
 
   const handleCalculate = () => {
-    const input: CalcInput = {
-      token0Amount: 0,
-      token1Amount: 0,
-      token0PriceEntry: Number(form.token0InitialPrice),
-      token1PriceEntry: Number(form.token1InitialPrice),
-      token0PriceCurrent: Number(form.token0CurrentPrice),
-      token1PriceCurrent: Number(form.token1CurrentPrice),
-      feeRate: Number(form.feeTier) / 100,
-      daysInPool: Number(form.daysInPool),
-      initialLiquidity: Number(form.initialLiquidity),
-    };
-    setResult(calculateIL(input));
+    setResult(
+      calculateIL({
+        token0Amount: 0,
+        token1Amount: 0,
+        token0PriceEntry: Number(form.token0InitialPrice),
+        token1PriceEntry: Number(form.token1InitialPrice),
+        token0PriceCurrent: Number(form.token0CurrentPrice),
+        token1PriceCurrent: Number(form.token1CurrentPrice),
+        feeRate: Number(form.feeTier) / 100,
+        daysInPool: Number(form.daysInPool),
+        initialLiquidity: Number(form.initialLiquidity),
+      }),
+    );
   };
 
+  const positiveFields = [
+    form.token0InitialPrice,
+    form.token0CurrentPrice,
+    form.token1InitialPrice,
+    form.token1CurrentPrice,
+    form.initialLiquidity,
+  ];
+  const days = parseNum(form.daysInPool);
   const isFormValid =
-    form.token0InitialPrice &&
-    form.token0CurrentPrice &&
-    form.token1InitialPrice &&
-    form.token1CurrentPrice &&
-    form.initialLiquidity &&
-    form.daysInPool;
+    positiveFields.every((v) => parseNum(v) > 0) &&
+    Number.isFinite(days) &&
+    days >= 0;
 
-  // Dynamic bar chart colors: HODL = blue, Pool = green if pool>hodl else red
-  const poolBetter = result ? result.poolValue >= result.hodlValue : false;
   const chartData = result
     ? [
-        { name: "HODL Value", value: result.hodlValue, fill: "#00A3FF" },
-        {
-          name: "Pool Value",
-          value: result.poolValue,
-          fill: poolBetter ? "#00FF88" : "#FF4466",
-        },
+        { name: "Fees Earned", value: result.feesEarned },
+        { name: "IL Loss", value: result.ilUSD },
       ]
     : [];
 
+  const netPositive = result ? result.netPnL >= 0 : true;
+
   return (
-    <div
-      data-ocid="il-calculator.page"
-      style={{ background: "#0D0D0D", minHeight: "100%" }}
-    >
+    <div data-ocid="il-calculator.page" className="min-h-full bg-background">
       {/* Header */}
-      <div
-        className="px-6 py-6"
-        style={{
-          background: "rgba(13,13,13,0.9)",
-          borderBottom: "1px solid rgba(0,163,255,0.15)",
-          backdropFilter: "blur(8px)",
-        }}
-      >
+      <div className="border-b border-border bg-card px-6 py-6">
         <div className="mx-auto max-w-6xl">
-          {/* Breadcrumb */}
-          <div className="mb-4">
-            <Breadcrumb
-              items={[{ label: "Home", href: "/" }, { label: "IL Calculator" }]}
-            />
-          </div>
           <div className="flex items-center gap-4">
-            <div
-              className="flex h-11 w-11 items-center justify-center rounded-xl"
-              style={{
-                background: "rgba(0,163,255,0.12)",
-                border: "1px solid rgba(0,163,255,0.3)",
-                boxShadow: "0 0 16px rgba(0,163,255,0.15)",
-              }}
-            >
-              <Calculator
-                className="h-5 w-5"
-                style={{
-                  color: "#00A3FF",
-                  filter: "drop-shadow(0 0 4px rgba(0,163,255,0.6))",
-                }}
-              />
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-primary/30 bg-primary/10">
+              <Calculator className="h-5 w-5 text-primary" aria-hidden />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1
-                  className="font-display text-2xl font-bold tracking-widest uppercase"
-                  style={{ color: "#e0e0e0" }}
-                >
-                  Impermanent Loss{" "}
-                  <span
-                    style={{
-                      color: "#00A3FF",
-                      textShadow: "0 0 16px rgba(0,163,255,0.5)",
-                    }}
-                  >
-                    Calc
-                  </span>
-                </h1>
-                <HelpIcon term="ImpermanentLoss" />
-              </div>
-              <div
-                className="mt-1 h-0.5 w-32 rounded-full"
-                style={{
-                  background:
-                    "linear-gradient(90deg, #00A3FF 0%, transparent 100%)",
-                  boxShadow: "0 0 8px rgba(0,163,255,0.6)",
-                }}
-              />
-              <p
-                className="text-sm mt-1 tracking-wide"
-                style={{ color: "#909090" }}
-              >
+            <div className="min-w-0">
+              <h1 className="font-display text-2xl font-bold uppercase tracking-widest text-foreground">
+                Impermanent Loss <span className="text-primary">Calc</span>
+              </h1>
+              <div className="mt-1 h-0.5 w-32 rounded-full bg-gradient-to-r from-primary to-transparent" />
+              <p className="mt-1 text-sm tracking-wide text-muted-foreground">
                 Estimate IL exposure and compare fee earnings against potential
                 losses
               </p>
@@ -517,144 +511,53 @@ export function ILCalculatorPage() {
       </div>
 
       <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
-        {/* ICP Identity input */}
-        <div
-          className="rounded-xl p-4"
-          style={{
-            background: "rgba(13,13,13,0.8)",
-            border:
-              form.icpPrincipal &&
-              /^[a-z0-9]{5}(-[a-z0-9]{5}){4,}(-[a-z0-9]{3})?$/.test(
-                form.icpPrincipal.trim(),
-              )
-                ? "1px solid rgba(0,255,136,0.3)"
-                : "1px solid rgba(0,163,255,0.15)",
-            backdropFilter: "blur(8px)",
-            boxShadow:
-              form.icpPrincipal &&
-              /^[a-z0-9]{5}(-[a-z0-9]{5}){4,}(-[a-z0-9]{3})?$/.test(
-                form.icpPrincipal.trim(),
-              )
-                ? "0 0 12px rgba(0,255,136,0.08)"
-                : "none",
-            transition: "border-color 0.2s, box-shadow 0.2s",
-          }}
-        >
-          {/* Section header */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div
-                className="flex h-6 w-6 items-center justify-center rounded"
-                style={{
-                  background: "rgba(0,163,255,0.1)",
-                  border: "1px solid rgba(0,163,255,0.25)",
-                }}
-              >
-                <KeyRound
-                  className="h-3.5 w-3.5"
-                  style={{
-                    color: "#00A3FF",
-                    filter: "drop-shadow(0 0 4px rgba(0,163,255,0.5))",
-                  }}
-                />
-              </div>
-              <label
-                htmlFor="il-icp-principal"
-                className="text-xs font-semibold uppercase tracking-widest"
-                style={{ color: "#c0c0c0" }}
-              >
-                ICP Identity
-              </label>
-            </div>
-            {form.icpPrincipal &&
-              /^[a-z0-9]{5}(-[a-z0-9]{5}){4,}(-[a-z0-9]{3})?$/.test(
-                form.icpPrincipal.trim(),
-              ) && (
-                <div className="flex items-center gap-1.5">
-                  <CheckCircle2
-                    className="h-3.5 w-3.5"
-                    style={{
-                      color: "#00FF88",
-                      filter: "drop-shadow(0 0 4px rgba(0,255,136,0.5))",
-                    }}
-                  />
-                  <span
-                    className="text-xs font-mono uppercase tracking-widest"
-                    style={{ color: "#00FF88" }}
-                  >
-                    Valid Principal
-                  </span>
-                </div>
-              )}
-          </div>
-
-          <GlowInput
-            id="il-icp-principal"
-            type="text"
-            placeholder="xxxxx-xxxxx-xxxxx-cai"
-            value={form.icpPrincipal}
-            onChange={(e) => setField("icpPrincipal", e.target.value)}
-            data-ocid="il-calculator.icp-principal.input"
-          />
-
-          {/* Helper text */}
-          <div className="mt-2.5 flex items-start gap-2">
-            <Info
-              className="h-3.5 w-3.5 mt-0.5 shrink-0"
-              style={{ color: "rgba(0,163,255,0.5)" }}
-            />
-            <p className="text-xs leading-relaxed" style={{ color: "#606060" }}>
-              Enter your ICP principal to auto-load active ICPswap and KongSwap
-              positions into the calculator. Your identity is never stored or
-              transmitted beyond the on-chain canister lookup.
-            </p>
-          </div>
-        </div>
-
         {/* Preset Buttons */}
         <div>
-          <p
-            className="mb-3 text-xs font-semibold uppercase tracking-widest"
-            style={{ color: "#606060" }}
-          >
-            Quick Presets
-          </p>
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              Quick Presets
+            </p>
+            <span
+              className="demo-badge"
+              data-ocid="il-calculator.presets.demo_badge"
+            >
+              Demo data
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Illustrative scenarios, not market quotes
+            </span>
+          </div>
           <div
             className="flex flex-wrap gap-2 sm:gap-2.5"
             data-ocid="il-calculator.presets"
           >
-            {PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => applyPreset(preset.id)}
-                data-ocid={`il-calculator.preset.${preset.id}`}
-                className="flex min-h-[38px] items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-smooth uppercase tracking-wider"
-                style={{
-                  background:
-                    activePreset === preset.id
-                      ? "rgba(0,163,255,0.18)"
-                      : "rgba(13,13,13,0.8)",
-                  border:
-                    activePreset === preset.id
-                      ? "1px solid rgba(0,163,255,0.5)"
-                      : "1px solid rgba(0,163,255,0.15)",
-                  color: activePreset === preset.id ? "#00A3FF" : "#909090",
-                  boxShadow:
-                    activePreset === preset.id
-                      ? "0 0 12px rgba(0,163,255,0.2)"
-                      : "none",
-                }}
-              >
-                <Zap
-                  className="h-3 w-3 flex-shrink-0"
-                  style={{
-                    color: activePreset === preset.id ? "#00A3FF" : "#606060",
-                  }}
-                />
-                {preset.label}
-              </button>
-            ))}
+            {PRESETS.map((preset) => {
+              const active = activePreset === preset.id;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => applyPreset(preset.id)}
+                  data-ocid={`il-calculator.preset.${preset.id}`}
+                  aria-pressed={active}
+                  className={cn(
+                    "transition-smooth flex min-h-[38px] items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-wider focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    active
+                      ? "border-primary/60 bg-primary/15 text-primary"
+                      : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                  )}
+                >
+                  <Zap
+                    className={cn(
+                      "h-3 w-3 flex-shrink-0",
+                      active ? "text-primary" : "text-muted-foreground",
+                    )}
+                    aria-hidden
+                  />
+                  {preset.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -662,55 +565,109 @@ export function ILCalculatorPage() {
           {/* Input Form */}
           <div className="space-y-5">
             {/* Token Prices card */}
-            <div className="rounded-xl overflow-hidden" style={glassCard}>
+            <div className={panelClass}>
               <div
-                className="px-5 py-4"
-                style={{ borderBottom: "1px solid rgba(0,163,255,0.1)" }}
+                className={cn(
+                  panelHeaderClass,
+                  "flex flex-wrap items-center justify-between gap-3",
+                )}
               >
-                <h2
-                  className="text-sm font-semibold uppercase tracking-widest"
-                  style={{ color: "#e0e0e0" }}
+                <h2 className={panelTitleClass}>Token Prices</h2>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleUseLivePrices}
+                  disabled={liveLoading}
+                  data-ocid="il-calculator.use-live-prices.button"
+                  className="gap-2 border-primary/50 text-primary hover:bg-primary/10 hover:text-primary"
                 >
-                  Token Prices
-                </h2>
+                  <Radio className="h-4 w-4" aria-hidden />
+                  {liveLoading ? "Fetching…" : "Use live prices"}
+                </Button>
               </div>
-              <div className="p-5 space-y-5">
+
+              <div className="space-y-5 p-5">
+                <div aria-live="polite" className="space-y-3">
+                  {liveLoading && (
+                    <LoadingState
+                      label="Fetching live prices from CoinGecko…"
+                      className="py-4"
+                    />
+                  )}
+                  {liveFailed && (
+                    <div className="space-y-2">
+                      <ErrorState
+                        title="Live prices unavailable"
+                        message="CoinGecko could not be reached. Enter prices manually below, or retry."
+                        onRetry={handleRetry}
+                        className="py-4"
+                      />
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-ocid="il-calculator.live.manual_hint"
+                      >
+                        Manual entry still works: type entry and current prices
+                        and press Calculate.
+                      </p>
+                    </div>
+                  )}
+                  {liveIssue && !liveLoading && (
+                    <p
+                      role="alert"
+                      data-ocid="il-calculator.live.error_state"
+                      className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-foreground"
+                    >
+                      <AlertCircle
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive"
+                        aria-hidden
+                      />
+                      {liveIssue}
+                    </p>
+                  )}
+                  {liveInfo && !liveLoading && !liveFailed && (
+                    <div
+                      data-ocid="il-calculator.live.success_state"
+                      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2"
+                    >
+                      <span className="live-badge">Live · CoinGecko</span>
+                      <span className="text-xs text-foreground">
+                        {liveInfo.symbol0}/{liveInfo.symbol1} filled at{" "}
+                        {liveInfo.at.toLocaleTimeString()}
+                      </span>
+                    </div>
+                  )}
+                  <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                    Set the token symbols, then use live prices. Current is the
+                    live USD price; Entry is the price 24h ago derived from
+                    CoinGecko's 24h change. Edit Entry to match your deposit.
+                  </p>
+                </div>
+
                 {/* Token A */}
                 <div className="space-y-3">
-                  <div
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold uppercase tracking-widest"
-                    style={{
-                      background: "rgba(0,163,255,0.1)",
-                      border: "1px solid rgba(0,163,255,0.3)",
-                      color: "#00A3FF",
-                    }}
-                  >
+                  <div className="inline-flex items-center rounded border border-primary/40 bg-primary/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-widest text-primary">
                     Token A
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Symbol
-                      </Label>
-                      <GlowInput
+                    <Field id="il-token0-name" label="Symbol">
+                      <Input
+                        id="il-token0-name"
+                        className={fieldInputClass}
                         placeholder="ETH"
                         value={form.token0Name}
                         onChange={(e) => setField("token0Name", e.target.value)}
                         data-ocid="il-calculator.token0-name.input"
                       />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Entry Price ($)
-                      </Label>
-                      <GlowInput
+                    </Field>
+                    <Field id="il-token0-entry" label="Entry Price ($)">
+                      <Input
+                        id="il-token0-entry"
+                        className={fieldInputClass}
                         type="number"
+                        min="0"
+                        step="any"
                         placeholder="3200"
                         value={form.token0InitialPrice}
                         onChange={(e) =>
@@ -718,16 +675,14 @@ export function ILCalculatorPage() {
                         }
                         data-ocid="il-calculator.token0-initial-price.input"
                       />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Current Price ($)
-                      </Label>
-                      <GlowInput
+                    </Field>
+                    <Field id="il-token0-current" label="Current Price ($)">
+                      <Input
+                        id="il-token0-current"
+                        className={fieldInputClass}
                         type="number"
+                        min="0"
+                        step="any"
                         placeholder="3840"
                         value={form.token0CurrentPrice}
                         onChange={(e) =>
@@ -735,51 +690,35 @@ export function ILCalculatorPage() {
                         }
                         data-ocid="il-calculator.token0-current-price.input"
                       />
-                    </div>
+                    </Field>
                   </div>
                 </div>
 
-                <div
-                  className="h-px"
-                  style={{ background: "rgba(0,163,255,0.08)" }}
-                />
+                <div className="h-px bg-border" />
 
                 {/* Token B */}
                 <div className="space-y-3">
-                  <div
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold uppercase tracking-widest"
-                    style={{
-                      background: "rgba(0,255,136,0.08)",
-                      border: "1px solid rgba(0,255,136,0.25)",
-                      color: "#00FF88",
-                    }}
-                  >
+                  <div className="inline-flex items-center rounded border border-accent/40 bg-accent/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-widest text-accent">
                     Token B
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Symbol
-                      </Label>
-                      <GlowInput
+                    <Field id="il-token1-name" label="Symbol">
+                      <Input
+                        id="il-token1-name"
+                        className={fieldInputClass}
                         placeholder="USDC"
                         value={form.token1Name}
                         onChange={(e) => setField("token1Name", e.target.value)}
                         data-ocid="il-calculator.token1-name.input"
                       />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Entry Price ($)
-                      </Label>
-                      <GlowInput
+                    </Field>
+                    <Field id="il-token1-entry" label="Entry Price ($)">
+                      <Input
+                        id="il-token1-entry"
+                        className={fieldInputClass}
                         type="number"
+                        min="0"
+                        step="any"
                         placeholder="1"
                         value={form.token1InitialPrice}
                         onChange={(e) =>
@@ -787,16 +726,14 @@ export function ILCalculatorPage() {
                         }
                         data-ocid="il-calculator.token1-initial-price.input"
                       />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Current Price ($)
-                      </Label>
-                      <GlowInput
+                    </Field>
+                    <Field id="il-token1-current" label="Current Price ($)">
+                      <Input
+                        id="il-token1-current"
+                        className={fieldInputClass}
                         type="number"
+                        min="0"
+                        step="any"
                         placeholder="1"
                         value={form.token1CurrentPrice}
                         onChange={(e) =>
@@ -804,35 +741,25 @@ export function ILCalculatorPage() {
                         }
                         data-ocid="il-calculator.token1-current-price.input"
                       />
-                    </div>
+                    </Field>
                   </div>
                 </div>
               </div>
             </div>
 
             {/* Pool Parameters card */}
-            <div className="rounded-xl overflow-hidden" style={glassCard}>
-              <div
-                className="px-5 py-4"
-                style={{ borderBottom: "1px solid rgba(0,163,255,0.1)" }}
-              >
-                <h2
-                  className="text-sm font-semibold uppercase tracking-widest"
-                  style={{ color: "#e0e0e0" }}
-                >
-                  Pool Parameters
-                </h2>
+            <div className={panelClass}>
+              <div className={panelHeaderClass}>
+                <h2 className={panelTitleClass}>Pool Parameters</h2>
               </div>
-              <div className="p-5 space-y-4">
-                <div className="space-y-1.5">
-                  <Label
-                    className="text-xs uppercase tracking-widest block"
-                    style={{ color: "#606060" }}
-                  >
-                    Initial Liquidity (USD)
-                  </Label>
-                  <GlowInput
+              <div className="space-y-4 p-5">
+                <Field id="il-liquidity" label="Initial Liquidity (USD)">
+                  <Input
+                    id="il-liquidity"
+                    className={fieldInputClass}
                     type="number"
+                    min="0"
+                    step="any"
                     placeholder="10000"
                     value={form.initialLiquidity}
                     onChange={(e) =>
@@ -840,35 +767,21 @@ export function ILCalculatorPage() {
                     }
                     data-ocid="il-calculator.initial-liquidity.input"
                   />
-                </div>
+                </Field>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Fee Tier
-                      </Label>
-                    </div>
+                  <Field id="il-fee-tier" label="Fee Tier">
                     <Select
                       value={form.feeTier}
                       onValueChange={(v) => setField("feeTier", v)}
                     >
                       <SelectTrigger
-                        className="w-full rounded-lg px-3 py-2.5 text-sm font-mono h-auto"
-                        style={inputStyle}
+                        id="il-fee-tier"
+                        className="w-full font-mono text-sm"
                         data-ocid="il-calculator.fee-tier.select"
                       >
                         <SelectValue placeholder="Select fee" />
                       </SelectTrigger>
-                      <SelectContent
-                        style={{
-                          background: "rgba(13,13,13,0.97)",
-                          border: "1px solid rgba(0,163,255,0.25)",
-                          backdropFilter: "blur(12px)",
-                        }}
-                      >
+                      <SelectContent>
                         {FEE_TIERS.map((tier) => (
                           <SelectItem
                             key={tier.value}
@@ -880,121 +793,72 @@ export function ILCalculatorPage() {
                         ))}
                       </SelectContent>
                     </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-1.5">
-                      <Label
-                        className="text-xs uppercase tracking-widest block"
-                        style={{ color: "#606060" }}
-                      >
-                        Fee APY
-                      </Label>
-                      <HelpIcon term="APY" />
-                    </div>
-                    <GlowInput
+                  </Field>
+                  <Field id="il-days" label="Days in Pool">
+                    <Input
+                      id="il-days"
+                      className={fieldInputClass}
                       type="number"
+                      min="0"
+                      step="1"
                       placeholder="30"
                       value={form.daysInPool}
                       onChange={(e) => setField("daysInPool", e.target.value)}
                       data-ocid="il-calculator.days-in-pool.input"
                     />
-                  </div>
+                  </Field>
                 </div>
 
-                <button
+                <Button
                   type="button"
-                  className="mt-2 w-full flex items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold uppercase tracking-widest transition-smooth"
+                  className="mt-2 w-full gap-2 py-5 text-sm font-semibold uppercase tracking-widest"
                   disabled={!isFormValid}
                   onClick={handleCalculate}
                   data-ocid="il-calculator.calculate.submit_button"
-                  style={{
-                    background: isFormValid
-                      ? "linear-gradient(135deg, rgba(0,163,255,0.25) 0%, rgba(0,163,255,0.1) 100%)"
-                      : "rgba(13,13,13,0.5)",
-                    border: isFormValid
-                      ? "1px solid rgba(0,163,255,0.5)"
-                      : "1px solid rgba(255,255,255,0.06)",
-                    color: isFormValid ? "#00A3FF" : "#444",
-                    boxShadow: isFormValid
-                      ? "0 0 20px rgba(0,163,255,0.15), inset 0 1px 0 rgba(0,163,255,0.1)"
-                      : "none",
-                    cursor: isFormValid ? "pointer" : "not-allowed",
-                  }}
                 >
-                  <Calculator
-                    className="h-4 w-4"
-                    style={{
-                      filter: isFormValid
-                        ? "drop-shadow(0 0 4px rgba(0,163,255,0.6))"
-                        : "none",
-                    }}
-                  />
+                  <Calculator className="h-4 w-4" aria-hidden />
                   Calculate Impermanent Loss
-                </button>
+                </Button>
+                {!isFormValid && (
+                  <p className="text-center text-xs text-muted-foreground">
+                    Enter positive prices and liquidity, plus days in pool, to
+                    calculate.
+                  </p>
+                )}
               </div>
             </div>
 
             {/* Formula Info */}
-            <div className="rounded-xl overflow-hidden" style={glassCard}>
+            <div className={panelClass}>
               <button
                 type="button"
-                className="flex w-full items-center justify-between px-5 py-4 transition-smooth"
+                className="transition-smooth flex w-full items-center justify-between px-5 py-4 text-foreground hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setShowFormula((v) => !v)}
+                aria-expanded={showFormula}
                 data-ocid="il-calculator.formula-info.toggle"
-                style={{ color: "#e0e0e0" }}
               >
                 <div className="flex items-center gap-2">
-                  <Info
-                    className="h-4 w-4"
-                    style={{
-                      color: "#00A3FF",
-                      filter: "drop-shadow(0 0 4px rgba(0,163,255,0.5))",
-                    }}
-                  />
+                  <Info className="h-4 w-4 text-primary" aria-hidden />
                   <span className="text-sm font-medium uppercase tracking-wider">
                     How IL is Calculated
                   </span>
                 </div>
-                <span
-                  className="text-xs uppercase tracking-widest"
-                  style={{ color: "#606060" }}
-                >
+                <span className="text-xs uppercase tracking-widest text-muted-foreground">
                   {showFormula ? "Hide" : "Show"}
                 </span>
               </button>
               {showFormula && (
-                <div
-                  className="px-5 pb-5 space-y-3 text-sm"
-                  style={{ borderTop: "1px solid rgba(0,163,255,0.08)" }}
-                >
-                  <div
-                    className="mt-4 rounded-lg p-3"
-                    style={{
-                      background: "rgba(0,163,255,0.05)",
-                      border: "1px solid rgba(0,163,255,0.15)",
-                    }}
-                  >
-                    <p
-                      className="mb-1 font-mono text-xs uppercase tracking-widest"
-                      style={{ color: "#606060" }}
-                    >
+                <div className="space-y-3 border-t border-border px-5 pb-5 text-sm">
+                  <div className="mt-4 rounded-lg border border-primary/25 bg-primary/5 p-3">
+                    <p className="mb-1 font-mono text-xs uppercase tracking-widest text-muted-foreground">
                       IL Formula
                     </p>
-                    <p
-                      className="font-mono"
-                      style={{
-                        color: "#00A3FF",
-                        textShadow: "0 0 8px rgba(0,163,255,0.4)",
-                      }}
-                    >
+                    <p className="font-mono text-primary">
                       IL = 2√k / (1+k) − 1
                     </p>
-                    <p
-                      className="mt-1 font-mono text-xs"
-                      style={{ color: "#606060" }}
-                    >
-                      where k = (P1_current / P1_entry) / (P0_current /
-                      P0_entry)
+                    <p className="mt-1 font-mono text-xs text-muted-foreground">
+                      where k = (P0_current / P0_entry) / (P1_current /
+                      P1_entry)
                     </p>
                   </div>
                   <ul className="space-y-2">
@@ -1002,14 +866,13 @@ export function ILCalculatorPage() {
                       "IL occurs when the price ratio between tokens changes after you deposit.",
                       "AMMs rebalance your holdings automatically as prices diverge.",
                       "Stablecoin pairs (e.g. USDC/USDT) have near-zero IL risk.",
-                      "Fees earned can offset IL — compare in the chart to find your break-even.",
+                      `Fees assume daily volume of ${DAILY_VOLUME_RATIO * 100}% of your liquidity at the chosen fee tier; real volume varies.`,
                     ].map((text) => (
                       <li
                         key={text}
-                        className="flex gap-2 text-xs"
-                        style={{ color: "#909090" }}
+                        className="flex gap-2 text-xs text-muted-foreground"
                       >
-                        <span style={{ color: "#00A3FF" }}>›</span>
+                        <span className="text-primary">›</span>
                         {text}
                       </li>
                     ))}
@@ -1024,117 +887,53 @@ export function ILCalculatorPage() {
             {!result ? (
               <div
                 data-ocid="il-calculator.results.empty_state"
-                className="rounded-xl flex flex-col items-center justify-center gap-4 text-center"
-                style={{
-                  ...glassCard,
-                  minHeight: 320,
-                  padding: 48,
-                }}
+                className="state-panel state-panel-empty min-h-[280px]"
               >
-                <div
-                  className="flex h-16 w-16 items-center justify-center rounded-full"
-                  style={{
-                    background: "rgba(0,163,255,0.08)",
-                    border: "1px solid rgba(0,163,255,0.2)",
-                    boxShadow: "0 0 24px rgba(0,163,255,0.08)",
-                  }}
-                >
-                  <Calculator
-                    className="h-8 w-8"
-                    style={{ color: "rgba(0,163,255,0.4)" }}
-                  />
-                </div>
-                <div>
-                  <p
-                    className="text-base font-semibold uppercase tracking-widest mb-2"
-                    style={{ color: "#e0e0e0" }}
-                  >
-                    Calculate Your IL
+                <span className="state-icon">
+                  <Calculator className="h-5 w-5" aria-hidden />
+                </span>
+                <div className="space-y-1">
+                  <p className="text-base font-semibold uppercase tracking-widest text-foreground">
+                    No results yet
                   </p>
-                  <p
-                    className="text-sm leading-relaxed"
-                    style={{ color: "#606060" }}
-                  >
-                    Enter token prices and amounts above to calculate your
-                    impermanent loss
-                  </p>
-                </div>
-                <div
-                  className="rounded-lg px-4 py-3 text-left max-w-xs"
-                  style={{
-                    background: "rgba(0,163,255,0.05)",
-                    border: "1px solid rgba(0,163,255,0.15)",
-                  }}
-                >
-                  <p
-                    className="text-xs font-semibold uppercase tracking-widest mb-1"
-                    style={{ color: "#00A3FF" }}
-                  >
-                    What is IL?
-                  </p>
-                  <p
-                    className="text-xs leading-relaxed"
-                    style={{ color: "#909090" }}
-                  >
-                    Impermanent Loss occurs when the price of your deposited
-                    tokens changes compared to when you deposited them in an AMM
-                    liquidity pool. The greater the price divergence, the larger
-                    the loss relative to simply holding.
+                  <p className="text-sm">
+                    Fill in token prices, or use live prices, then Calculate
                   </p>
                 </div>
               </div>
             ) : (
               <>
-                {/* Results label divider */}
                 <div className="flex items-center gap-3">
-                  <div
-                    className="h-px flex-1"
-                    style={{ background: "rgba(0,163,255,0.15)" }}
-                  />
-                  <span
-                    className="text-xs font-semibold uppercase tracking-widest"
-                    style={{ color: "#00A3FF" }}
-                  >
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-xs font-semibold uppercase tracking-widest text-primary">
                     Results
                   </span>
-                  <div
-                    className="h-px flex-1"
-                    style={{ background: "rgba(0,163,255,0.15)" }}
-                  />
+                  <div className="h-px flex-1 bg-border" />
                 </div>
 
                 {/* Result Metrics */}
-                <div className="rounded-xl overflow-hidden" style={glassCard}>
+                <div className={panelClass}>
                   <div
-                    className="px-5 py-4 flex items-center justify-between"
-                    style={{ borderBottom: "1px solid rgba(0,163,255,0.1)" }}
+                    className={cn(
+                      panelHeaderClass,
+                      "flex items-center justify-between",
+                    )}
                   >
-                    <h2
-                      className="text-sm font-semibold uppercase tracking-widest"
-                      style={{ color: "#e0e0e0" }}
-                    >
-                      Summary
-                    </h2>
+                    <h2 className={panelTitleClass}>Summary</h2>
                     <div
-                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold uppercase tracking-wider"
-                      style={{
-                        background:
-                          result.netPnL >= 0
-                            ? "rgba(0,255,136,0.1)"
-                            : "rgba(255,68,102,0.1)",
-                        border:
-                          result.netPnL >= 0
-                            ? "1px solid rgba(0,255,136,0.3)"
-                            : "1px solid rgba(255,68,102,0.3)",
-                        color: result.netPnL >= 0 ? "#00FF88" : "#ff4466",
-                      }}
-                    >
-                      {result.netPnL >= 0 ? (
-                        <TrendingUp className="h-3 w-3" />
-                      ) : (
-                        <TrendingDown className="h-3 w-3" />
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded border px-3 py-1 text-xs font-semibold uppercase tracking-wider",
+                        netPositive
+                          ? "border-accent/40 bg-accent/10 text-accent"
+                          : "border-destructive/40 bg-destructive/10 text-destructive",
                       )}
-                      Net {result.netPnL >= 0 ? "Profit" : "Loss"}
+                    >
+                      {netPositive ? (
+                        <TrendingUp className="h-3 w-3" aria-hidden />
+                      ) : (
+                        <TrendingDown className="h-3 w-3" aria-hidden />
+                      )}
+                      Net {netPositive ? "Profit" : "Loss"}
                     </div>
                   </div>
 
@@ -1142,218 +941,83 @@ export function ILCalculatorPage() {
                     className="grid grid-cols-2 gap-3 p-5"
                     data-ocid="il-calculator.results.section"
                   >
-                    {/* IL % — prominent with dynamic color */}
-                    <div
-                      className="rounded-xl p-4 col-span-2"
-                      style={{
-                        background: poolBetter
-                          ? "rgba(0,255,136,0.06)"
-                          : "rgba(255,68,102,0.06)",
-                        border: poolBetter
-                          ? "1px solid rgba(0,255,136,0.2)"
-                          : "1px solid rgba(255,68,102,0.2)",
-                      }}
-                    >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                    <div className="col-span-2 rounded-xl border border-destructive/30 bg-destructive/10 p-4">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         Impermanent Loss %
                       </p>
-                      <p
-                        className="mt-1 font-mono text-2xl font-bold"
-                        style={{
-                          color: poolBetter ? "#00FF88" : "#ff4466",
-                          textShadow: poolBetter
-                            ? "0 0 16px rgba(0,255,136,0.6), 0 0 32px rgba(0,255,136,0.3)"
-                            : "0 0 16px rgba(255,68,102,0.6), 0 0 32px rgba(255,68,102,0.3)",
-                        }}
-                      >
-                        {poolBetter ? "+" : "-"}
-                        {result.ilPercent.toFixed(2)}%
-                      </p>
-                      <p
-                        className="mt-0.5 text-xs"
-                        style={{ color: "#606060" }}
-                      >
-                        {poolBetter
-                          ? "Pool is outperforming HODL strategy"
-                          : "Pool is underperforming vs HODL strategy"}
+                      <p className="glow-destructive mt-1 font-mono text-4xl font-bold text-destructive">
+                        -{result.ilPercent.toFixed(2)}%
                       </p>
                     </div>
 
-                    <div
-                      className="rounded-xl p-4"
-                      style={{
-                        background: "rgba(255,68,102,0.04)",
-                        border: "1px solid rgba(255,68,102,0.12)",
-                      }}
-                    >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                    <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-4">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         IL Dollar Loss
                       </p>
-                      <p
-                        className="mt-1 font-mono text-xl font-bold"
-                        style={{
-                          color: "#ff4466",
-                          textShadow: "0 0 10px rgba(255,68,102,0.5)",
-                        }}
-                      >
-                        -$
-                        {result.ilUSD.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })}
+                      <p className="mt-1 font-mono text-xl font-bold text-destructive">
+                        -${fmtUsd(result.ilUSD)}
                       </p>
                     </div>
 
-                    <div
-                      className="rounded-xl p-4"
-                      style={{
-                        background: "rgba(0,255,136,0.04)",
-                        border: "1px solid rgba(0,255,136,0.12)",
-                      }}
-                    >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                    <div className="rounded-xl border border-accent/30 bg-accent/5 p-4">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         Fees Earned (est.)
                       </p>
-                      <p
-                        className="mt-1 font-mono text-xl font-bold"
-                        style={{
-                          color: "#00FF88",
-                          textShadow: "0 0 10px rgba(0,255,136,0.5)",
-                        }}
-                      >
-                        +$
-                        {result.feesEarned.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })}
+                      <p className="mt-1 font-mono text-xl font-bold text-accent">
+                        +${fmtUsd(result.feesEarned)}
                       </p>
                     </div>
 
-                    <div
-                      className="rounded-xl p-4"
-                      style={{
-                        background: "rgba(0,163,255,0.04)",
-                        border: "1px solid rgba(0,163,255,0.12)",
-                      }}
-                    >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                    <div className="rounded-xl border border-border bg-muted/50 p-4">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         HODL Value
                       </p>
-                      <p
-                        className="mt-1 font-mono text-lg font-semibold"
-                        style={{
-                          color: "#00A3FF",
-                          textShadow: "0 0 8px rgba(0,163,255,0.4)",
-                        }}
-                      >
-                        $
-                        {result.hodlValue.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })}
+                      <p className="mt-1 font-mono text-lg font-semibold text-foreground">
+                        ${fmtUsd(result.hodlValue)}
                       </p>
                     </div>
 
-                    <div
-                      className="rounded-xl p-4"
-                      style={{
-                        background: poolBetter
-                          ? "rgba(0,255,136,0.04)"
-                          : "rgba(255,68,102,0.04)",
-                        border: poolBetter
-                          ? "1px solid rgba(0,255,136,0.12)"
-                          : "1px solid rgba(255,68,102,0.12)",
-                      }}
-                    >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                    <div className="rounded-xl border border-border bg-muted/50 p-4">
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         Pool Value
                       </p>
-                      <p
-                        className="mt-1 font-mono text-lg font-semibold"
-                        style={{
-                          color: poolBetter ? "#00FF88" : "#ff4466",
-                          textShadow: poolBetter
-                            ? "0 0 8px rgba(0,255,136,0.4)"
-                            : "0 0 8px rgba(255,68,102,0.4)",
-                        }}
-                      >
-                        $
-                        {result.poolValue.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })}
+                      <p className="mt-1 font-mono text-lg font-semibold text-foreground">
+                        ${fmtUsd(result.poolValue)}
                       </p>
                     </div>
 
                     <div
-                      className="rounded-xl p-4 col-span-2"
-                      style={{
-                        background:
-                          result.netPnL >= 0
-                            ? "rgba(0,255,136,0.06)"
-                            : "rgba(255,68,102,0.06)",
-                        border:
-                          result.netPnL >= 0
-                            ? "1px solid rgba(0,255,136,0.2)"
-                            : "1px solid rgba(255,68,102,0.2)",
-                      }}
+                      className={cn(
+                        "col-span-2 rounded-xl border p-4",
+                        netPositive
+                          ? "border-accent/30 bg-accent/10"
+                          : "border-destructive/30 bg-destructive/10",
+                      )}
                     >
-                      <p
-                        className="text-xs uppercase tracking-widest"
-                        style={{ color: "#606060" }}
-                      >
+                      <p className="text-xs uppercase tracking-widest text-muted-foreground">
                         Net P&amp;L
                       </p>
                       <p
-                        className="mt-1 font-mono text-2xl font-bold"
-                        style={{
-                          color: result.netPnL >= 0 ? "#00FF88" : "#ff4466",
-                          textShadow:
-                            result.netPnL >= 0
-                              ? "0 0 12px rgba(0,255,136,0.5)"
-                              : "0 0 12px rgba(255,68,102,0.5)",
-                        }}
+                        className={cn(
+                          "mt-1 font-mono text-2xl font-bold",
+                          netPositive ? "text-accent" : "text-destructive",
+                        )}
                       >
-                        {result.netPnL >= 0 ? "+" : ""}$
-                        {result.netPnL.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })}
+                        {netPositive ? "+" : "-"}$
+                        {fmtUsd(Math.abs(result.netPnL))}
                       </p>
                     </div>
                   </div>
 
                   {result.breakEvenDays > 0 && (
-                    <div
-                      className="mx-5 mb-5 flex items-center gap-2 rounded-lg px-4 py-3"
-                      style={{
-                        background: "rgba(0,163,255,0.06)",
-                        border: "1px solid rgba(0,163,255,0.2)",
-                      }}
-                    >
+                    <div className="mx-5 mb-5 flex items-center gap-2 rounded-lg border border-primary/25 bg-primary/5 px-4 py-3">
                       <AlertCircle
-                        className="h-4 w-4 shrink-0"
-                        style={{ color: "#00A3FF" }}
+                        className="h-4 w-4 shrink-0 text-primary"
+                        aria-hidden
                       />
-                      <p className="text-sm" style={{ color: "#909090" }}>
+                      <p className="text-sm text-muted-foreground">
                         You need approximately{" "}
-                        <span
-                          className="font-semibold font-mono"
-                          style={{
-                            color: "#00A3FF",
-                            textShadow: "0 0 8px rgba(0,163,255,0.5)",
-                          }}
-                        >
+                        <span className="font-mono font-semibold text-primary">
                           {result.breakEvenDays} days
                         </span>{" "}
                         in this pool to break even from fees vs IL.
@@ -1363,27 +1027,18 @@ export function ILCalculatorPage() {
                 </div>
 
                 {/* Bar Chart */}
-                <div className="rounded-xl overflow-hidden" style={glassCard}>
-                  <div
-                    className="px-5 py-4"
-                    style={{ borderBottom: "1px solid rgba(0,163,255,0.1)" }}
-                  >
-                    <h2
-                      className="text-sm font-semibold uppercase tracking-widest"
-                      style={{ color: "#e0e0e0" }}
-                    >
-                      HODL vs Pool Value
-                    </h2>
-                    <p className="text-xs mt-0.5" style={{ color: "#606060" }}>
-                      HODL strategy (blue) vs LP pool value (
-                      {poolBetter
-                        ? "green = outperforming"
-                        : "red = underperforming"}
-                      )
+                <div className={panelClass}>
+                  <div className={panelHeaderClass}>
+                    <h2 className={panelTitleClass}>Fee vs IL Comparison</h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      Estimated fees earned vs impermanent loss
                     </p>
                   </div>
                   <div className="p-5">
-                    <div data-ocid="il-calculator.chart.section">
+                    <div
+                      data-ocid="il-calculator.chart.section"
+                      className="[&_.recharts-cartesian-grid_line]:stroke-border [&_.recharts-text]:fill-muted-foreground"
+                    >
                       <ResponsiveContainer
                         width="100%"
                         height={isMobile ? 180 : 240}
@@ -1394,17 +1049,11 @@ export function ILCalculatorPage() {
                         >
                           <CartesianGrid
                             strokeDasharray="3 3"
-                            stroke="rgba(0,163,255,0.08)"
                             vertical={false}
                           />
                           <XAxis
                             dataKey="name"
-                            tick={{
-                              fill: "#606060",
-                              fontSize: 11,
-                              fontFamily: "var(--font-mono)",
-                              fontWeight: 600,
-                            }}
+                            tick={{ fontSize: 11, fontWeight: 600 }}
                             axisLine={false}
                             tickLine={false}
                           />
@@ -1412,30 +1061,19 @@ export function ILCalculatorPage() {
                             tickFormatter={(v: number) =>
                               `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
                             }
-                            tick={{
-                              fill: "#606060",
-                              fontSize: 10,
-                              fontFamily: "var(--font-mono)",
-                            }}
+                            tick={{ fontSize: 10 }}
                             axisLine={false}
                             tickLine={false}
                           />
                           <Tooltip
-                            content={
-                              <ChartTooltip
-                                hodlValue={result.hodlValue}
-                                poolValue={result.poolValue}
-                              />
-                            }
+                            content={<ChartTooltip />}
+                            cursor={{ fillOpacity: 0.08 }}
                           />
                           <Bar dataKey="value" radius={[6, 6, 0, 0]}>
                             {chartData.map((entry) => (
                               <Cell
                                 key={entry.name}
-                                fill={entry.fill}
-                                style={{
-                                  filter: `drop-shadow(0 0 8px ${entry.fill}66)`,
-                                }}
+                                className={BAR_FILL[entry.name]}
                               />
                             ))}
                           </Bar>
@@ -1444,35 +1082,15 @@ export function ILCalculatorPage() {
                     </div>
                     <div className="mt-3 flex items-center justify-center gap-6">
                       <div className="flex items-center gap-2">
-                        <div
-                          className="h-3 w-3 rounded-sm"
-                          style={{
-                            background: "#00A3FF",
-                            boxShadow: "0 0 6px rgba(0,163,255,0.6)",
-                          }}
-                        />
-                        <span
-                          className="text-xs uppercase tracking-widest font-mono"
-                          style={{ color: "#909090" }}
-                        >
-                          HODL Value
+                        <div className="h-3 w-3 rounded-sm bg-accent" />
+                        <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                          Fees Earned
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div
-                          className="h-3 w-3 rounded-sm"
-                          style={{
-                            background: poolBetter ? "#00FF88" : "#FF4466",
-                            boxShadow: poolBetter
-                              ? "0 0 6px rgba(0,255,136,0.6)"
-                              : "0 0 6px rgba(255,68,102,0.6)",
-                          }}
-                        />
-                        <span
-                          className="text-xs uppercase tracking-widest font-mono"
-                          style={{ color: "#909090" }}
-                        >
-                          Pool Value
+                        <div className="h-3 w-3 rounded-sm bg-primary" />
+                        <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                          IL Loss
                         </span>
                       </div>
                     </div>

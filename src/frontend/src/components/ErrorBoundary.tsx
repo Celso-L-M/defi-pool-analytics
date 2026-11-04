@@ -7,14 +7,17 @@ import { Component } from "react";
 
 interface FallbackUIProps {
   error?: Error;
+  /** Retry action. When omitted the page is reloaded. */
+  onRetry?: () => void;
 }
 
-export function FallbackUI({ error }: FallbackUIProps) {
+export function FallbackUI({ error, onRetry }: FallbackUIProps) {
   return (
     <div
-      className="min-h-[240px] flex flex-col items-center justify-center gap-6 p-8
-                 bg-background text-foreground rounded-xl border border-destructive/40"
+      className="min-h-[240px] m-4 flex flex-col items-center justify-center gap-6 p-8
+                 bg-card text-foreground rounded-lg border border-destructive/40"
       data-ocid="error_boundary.error_state"
+      role="alert"
     >
       <div className="flex flex-col items-center gap-3 text-center">
         <span
@@ -27,17 +30,18 @@ export function FallbackUI({ error }: FallbackUIProps) {
           />
         </span>
 
-        <h2 className="text-xl font-semibold text-foreground">
+        <h2 className="text-xl font-display font-semibold text-foreground">
           Something went wrong
         </h2>
         <p className="text-sm text-muted-foreground max-w-sm">
-          An unexpected error occurred while rendering this section.
+          An unexpected error occurred while rendering this section. Your saved
+          data is safe.
         </p>
       </div>
 
       {error && (
         <pre
-          className="w-full max-w-lg text-xs bg-card border border-border rounded-lg
+          className="w-full max-w-lg text-xs bg-background border border-border rounded-lg
                      p-4 overflow-x-auto text-destructive font-mono whitespace-pre-wrap
                      break-words"
           aria-label="Error details"
@@ -46,16 +50,25 @@ export function FallbackUI({ error }: FallbackUIProps) {
         </pre>
       )}
 
-      <Button
-        type="button"
-        variant="outline"
-        className="gap-2"
-        onClick={() => window.location.reload()}
-        data-ocid="error_boundary.reload_button"
-      >
-        <RefreshCw className="w-4 h-4" />
-        Reload page
-      </Button>
+      <div className="flex flex-wrap items-center justify-center gap-3">
+        <Button
+          type="button"
+          className="gap-2"
+          onClick={onRetry ?? (() => window.location.reload())}
+          data-ocid="error_boundary.retry_button"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Try again
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => window.location.reload()}
+          data-ocid="error_boundary.reload_button"
+        >
+          Reload page
+        </Button>
+      </div>
     </div>
   );
 }
@@ -87,16 +100,19 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo): void {
-    // In production you could forward to a monitoring service here.
     console.error("[ErrorBoundary] Caught error:", error, info.componentStack);
   }
+
+  reset = (): void => {
+    this.setState({ hasError: false, error: undefined });
+  };
 
   render() {
     if (this.state.hasError) {
       if (this.props.fallback) {
         return this.props.fallback;
       }
-      return <FallbackUI error={this.state.error} />;
+      return <FallbackUI error={this.state.error} onRetry={this.reset} />;
     }
     return this.props.children;
   }

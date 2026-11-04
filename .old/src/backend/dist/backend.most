@@ -1,4 +1,197 @@
-// Version: 1.0.0
-actor {
-  
+// Version: 4.0.0
+type AccessControlState__201339279 =
+  {
+    var adminAssigned : Bool;
+    userRoles : Map__230067015<Principal, UserRole__91647283>
+  };
+type AlertHistoryEntry__257372445 =
+  {
+    emailSent : Bool;
+    id : Nat;
+    metric : AlertMetric__537167566;
+    observedValue : Float;
+    poolLabel : Text;
+    read : Bool;
+    ruleId : Nat;
+    threshold : Float;
+    triggeredAt : Int
+  };
+type AlertHistoryEntry__84057993 =
+  {
+    emailSent : Bool;
+    id : Nat;
+    metric : AlertMetric__12082356;
+    observedValue : Float;
+    poolLabel : Text;
+    read : Bool;
+    ruleId : Nat;
+    threshold : Float;
+    triggeredAt : Timestamp__301639476
+  };
+type AlertMetric__12082356 = {#apyAbove; #apyBelow; #tvlDropPercent};
+type AlertMetric__537167566 = {#apyAbove; #apyBelow; #tvlDropPercent};
+type AlertRule__887261712 =
+  {
+    armed : Bool;
+    createdAt : Int;
+    enabled : Bool;
+    id : Nat;
+    lastTriggeredAt : ?Int;
+    metric : AlertMetric__537167566;
+    poolId : Text;
+    poolLabel : Text;
+    threshold : Float
+  };
+type AlertRule__942355495 =
+  {
+    armed : Bool;
+    createdAt : Timestamp__301639476;
+    enabled : Bool;
+    id : Nat;
+    lastTriggeredAt : ?Timestamp__301639476;
+    metric : AlertMetric__12082356;
+    poolId : PoolId__6673870;
+    poolLabel : Text;
+    threshold : Float
+  };
+type Data__44217153<K, V> = {var count : Nat__227979830; kvs : [var ?(K, V)]};
+type Internal__283199666<K, V> =
+  {children : [var ?Node__204828119<K, V>]; data : Data__44217153<K, V>};
+type Leaf__598469445<K, V> = {data : Data__44217153<K, V>};
+type Map__230067015<K, V> = Map__405889023<K, V>;
+type Map__405889023<K, V> = Map__603270868<K, V>;
+type Map__603270868<K, V> =
+  {var root : Node__204828119<K, V>; var size : Nat__227979830};
+type Nat__227979830 = Nat__920180692;
+type Nat__920180692 = Nat;
+type NewActor__769816496 =
+  {
+    accessControlState : AccessControlState__201339279;
+    alertCounters : {var nextHistoryId : Nat; var nextRuleId : Nat};
+    alertHistory :
+      Map__230067015<Principal,
+                      Map__230067015<Nat, AlertHistoryEntry__257372445>>;
+    alertRules :
+      Map__230067015<Principal, Map__230067015<Nat, AlertRule__887261712>>;
+    emails : Map__230067015<Principal, Text>;
+    positions :
+      Map__230067015<Principal, Map__230067015<Nat, Position__634065238>>;
+    settings : Map__230067015<Principal, Settings__637630088>;
+    userCounters : {var nextPositionId : Nat};
+    wallets :
+      Map__230067015<Principal, Map__230067015<Text, TrackedWallet__48324189>>;
+    watchlists :
+      Map__230067015<Principal,
+                      Map__230067015<Text, WatchlistEntry__275861773>>
+  };
+type Node__204828119<K, V> =
+  {#internal : Internal__283199666<K, V>; #leaf : Leaf__598469445<K, V>};
+type OldActor__512397517 = {};
+type PoolId__6673870 = Text;
+type Position__138333227 =
+  {
+    amountUsd : Float;
+    displayName : Text;
+    entryTimestamp : Timestamp__301639476;
+    id : Nat;
+    notes : ?Text;
+    poolId : PoolId__6673870;
+    symbol : Text
+  };
+type Position__634065238 =
+  {
+    amountUsd : Float;
+    displayName : Text;
+    entryTimestamp : Int;
+    id : Nat;
+    notes : ?Text;
+    poolId : Text;
+    symbol : Text
+  };
+type Settings__417355675 =
+  {
+    autoRefreshEnabled : Bool;
+    emailAlertsEnabled : Bool;
+    theme : Theme__886809759
+  };
+type Settings__637630088 =
+  {
+    autoRefreshEnabled : Bool;
+    emailAlertsEnabled : Bool;
+    theme : Theme__999849014
+  };
+type Theme__886809759 = {#auto; #dark; #light};
+type Theme__999849014 = {#auto; #dark; #light};
+type Timestamp__301639476 = Int;
+type TrackedWallet__120653499 = {address : Text; chain : Text};
+type TrackedWallet__48324189 = {address : Text; chain : Text};
+type UserRole__91647283 = {#admin; #guest; #user};
+type WatchlistEntry__275861773 =
+  {
+    chain : Text;
+    displayName : Text;
+    poolId : Text;
+    project : Text;
+    symbol : Text
+  };
+type WatchlistEntry__56575197 =
+  {
+    chain : Text;
+    displayName : Text;
+    poolId : PoolId__6673870;
+    project : Text;
+    symbol : Text
+  };
+{
+  "00000000_000000" : (_old : OldActor__512397517) -> NewActor__769816496
+}
+actor  {
+  stable accessControlState :
+    {
+      var adminAssigned : Bool;
+      userRoles : Map__230067015<Principal, UserRole__91647283>
+    };
+  stable alertCounters : {var nextHistoryId : Nat; var nextRuleId : Nat};
+  stable alertHistory :
+    {
+      var root :
+        Node__204828119<Principal,
+                         Map__230067015<Nat, AlertHistoryEntry__84057993>>;
+      var size : Nat__227979830
+    };
+  stable alertRules :
+    {
+      var root :
+        Node__204828119<Principal, Map__230067015<Nat, AlertRule__942355495>>;
+      var size : Nat__227979830
+    };
+  stable emails :
+    {var root : Node__204828119<Principal, Text>; var size : Nat__227979830};
+  stable positions :
+    {
+      var root :
+        Node__204828119<Principal, Map__230067015<Nat, Position__138333227>>;
+      var size : Nat__227979830
+    };
+  stable settings :
+    {
+      var root : Node__204828119<Principal, Settings__417355675>;
+      var size : Nat__227979830
+    };
+  stable userCounters : {var nextPositionId : Nat};
+  stable wallets :
+    {
+      var root :
+        Node__204828119<Principal,
+                         Map__230067015<Text, TrackedWallet__120653499>>;
+      var size : Nat__227979830
+    };
+  stable watchlists :
+    {
+      var root :
+        Node__204828119<Principal,
+                         Map__230067015<PoolId__6673870,
+                                         WatchlistEntry__56575197>>;
+      var size : Nat__227979830
+    }
 };

@@ -5,6 +5,8 @@ version = "0.1.0"
 [build]
 outputDir = "src/backend/dist"
 args = [ "--release" ]
+check-wasm = true
+check-deploy = true
 
 [canisters.backend]
 main = "src/backend/main.mo"
@@ -12,16 +14,25 @@ main = "src/backend/main.mo"
 [canisters.backend.check-stable]
 path = ".old/src/backend/dist/backend.most"
 
+[canisters.backend.migrations]
+chain = "src/backend/migrations"
+check-limit = 1
+
 [toolchain]
-moc = "1.7.0"
-lintoko = "0.10.0"
+moc = "2.1.0"
+lintoko = "0.12.0"
 
 [lint]
 extends = true
 
 [moc]
-args = [ "--default-persistent-actors", "--actor-idl=src/backend/system-idl", "--implicit-package=core", "-no-check-ir", "-E=M0236,M0235,M0223,M0237", "-A=M0198" ]
-version = "1.8.2"
+args = [ "-W=M0254,M0235,M0223,M0236,M0237", "-A=M0241", "--implicit-package=core", "-no-check-ir" ]
 
 [dependencies]
-core = "2.2.0"
+core = "2.6.2"
+ic = "5.0.0"
+caffeineai-authorization = "1.0.1"
+caffeineai-email = "0.5.0"
+caffeineai-http-outcalls = "0.1.5"
+caffeineai-inference-client = "0.4.1"
+caffeineai-oql = "0.8.1"

@@ -1,2 +1,244 @@
+type WatchlistEntry = 
+ record {
+   chain: text;
+   displayName: text;
+   poolId: PoolId;
+   project: text;
+   symbol: text;
+ };
+type Value = 
+ variant {
+   "bool": bool;
+   float: float64;
+   "int": int;
+   "nat": nat;
+   "null";
+   "text": text;
+ };
+type UserRole = 
+ variant {
+   admin;
+   guest;
+   user;
+ };
+type TransformationOutput = 
+ record {
+   body: blob;
+   headers: vec HttpHeader;
+   status: nat;
+ };
+type TransformationInput = 
+ record {
+   context: blob;
+   response: HttpRequestResult;
+ };
+type TrackedWallet = 
+ record {
+   address: text;
+   chain: text;
+ };
+type Timestamp = int;
+type Theme = 
+ variant {
+   auto;
+   dark;
+   light;
+ };
+type Settings = 
+ record {
+   autoRefreshEnabled: bool;
+   emailAlertsEnabled: bool;
+   theme: Theme;
+ };
+type Result__1 = 
+ record {
+   hasMore: bool;
+   rows: vec vec Cell;
+ };
+type Result_3 = 
+ variant {
+   err: Error;
+   ok;
+ };
+type Result_2 = 
+ variant {
+   err: ApiError;
+   ok;
+ };
+type Result_1 = 
+ variant {
+   err: ApiError;
+   ok: AlertRule;
+ };
+type Result = 
+ variant {
+   err: ApiError;
+   ok: Position;
+ };
+type PositionInput = 
+ record {
+   amountUsd: float64;
+   displayName: text;
+   entryTimestamp: Timestamp;
+   notes: opt text;
+   poolId: PoolId;
+   symbol: text;
+ };
+type Position = 
+ record {
+   amountUsd: float64;
+   displayName: text;
+   entryTimestamp: Timestamp;
+   id: nat;
+   notes: opt text;
+   poolId: PoolId;
+   symbol: text;
+ };
+type PoolId = text;
+type ImportSummary = 
+ record {
+   positionsAdded: nat;
+   skipped: nat;
+   walletsAdded: nat;
+   watchlistAdded: nat;
+ };
+type ImportBatch = 
+ record {
+   positions: vec PositionInput;
+   wallets: vec TrackedWallet;
+   watchlist: vec WatchlistEntry;
+ };
+type HttpRequestResult = 
+ record {
+   body: blob;
+   headers: vec HttpHeader;
+   status: nat;
+ };
+type HttpHeader = 
+ record {
+   name: text;
+   value: text;
+ };
+type EvaluationSummary = 
+ record {
+   failedPools: nat;
+   rulesEvaluated: nat;
+   triggered: nat;
+ };
+type Error = 
+ variant {
+   AmbiguousAttribute: record {
+                         field: text;
+                         sources: vec text;
+                       };
+   FrontendOriginMismatch: record {
+                             expected: vec text;
+                             got: text;
+                           };
+   FrontendOriginsNotConfigured;
+   MalformedCandid;
+   MissingField: text;
+   MixedSsoSources: record {
+                      otherKeys: vec text;
+                      ssoKeys: vec text;
+                    };
+   NoAttributes;
+   Stale: record {ageNs: nat;};
+   UnknownNonce;
+   UntrustedSsoSource: record {domain: text;};
+ };
+type Credentials = 
+ record {
+   apiKey: text;
+   baseUrl: text;
+   expiresAt: text;
+ };
+type Cell = 
+ record {
+   name: text;
+   value: Value;
+ };
+type ApiError = 
+ variant {
+   invalid: text;
+   limitReached: nat;
+   notFound;
+ };
+type AlertRuleInput = 
+ record {
+   metric: AlertMetric;
+   poolId: PoolId;
+   poolLabel: text;
+   threshold: float64;
+ };
+type AlertRule = 
+ record {
+   armed: bool;
+   createdAt: Timestamp;
+   enabled: bool;
+   id: nat;
+   lastTriggeredAt: opt Timestamp;
+   metric: AlertMetric;
+   poolId: PoolId;
+   poolLabel: text;
+   threshold: float64;
+ };
+type AlertMetric = 
+ variant {
+   apyAbove;
+   apyBelow;
+   tvlDropPercent;
+ };
+type AlertHistoryEntry = 
+ record {
+   emailSent: bool;
+   id: nat;
+   metric: AlertMetric;
+   observedValue: float64;
+   poolLabel: text;
+   read: bool;
+   ruleId: nat;
+   threshold: float64;
+   triggeredAt: Timestamp;
+ };
 service : {
+  _initialize_access_control: () -> ();
+  _internet_identity_sign_in_finish: () -> (Result_3);
+  _internet_identity_sign_in_start: () -> (blob);
+  addPosition: (input: PositionInput) -> (Result);
+  addToWatchlist: (entry: WatchlistEntry) -> (Result_2);
+  addWallet: (wallet: TrackedWallet) -> (Result_2);
+  assignCallerUserRole: (user: principal, role: UserRole) -> ();
+  clearAlertHistory: () -> ();
+  createAlertRule: (input: AlertRuleInput) -> (Result_1);
+  deleteAlertRule: (id: nat) -> (bool);
+  deleteAllMyData: () -> ();
+  /// Runs an evaluation of the caller's own enabled rules immediately.
+  evaluateMyAlertsNow: () -> (EvaluationSummary);
+  execute: (qJson: text) -> (Result__1) query;
+  getApiDoc: () -> (text) query;
+  getCallerUserRole: () -> (UserRole) query;
+  /// Mints the caller's short-lived inference key. Signed-in callers only.
+  getInferenceCredentials: () -> (Credentials);
+  getSettings: () -> (Settings) query;
+  hasVerifiedEmail: () -> (bool) query;
+  importLocalData: (batch: ImportBatch) -> (ImportSummary);
+  isCallerAdmin: () -> (bool) query;
+  listAlertHistory: () -> (vec AlertHistoryEntry) query;
+  listAlertRules: () -> (vec AlertRule) query;
+  listPositions: () -> (vec Position) query;
+  listWallets: () -> (vec TrackedWallet) query;
+  listWatchlist: () -> (vec WatchlistEntry) query;
+  markAlertRead: (id: nat) -> (bool);
+  markAllAlertsRead: () -> ();
+  removeFromWatchlist: (poolId: PoolId) -> (bool);
+  removePosition: (id: nat) -> (bool);
+  removeWallet: (chain: text, address: text) -> (bool);
+  schema: () -> (text) query;
+  setAlertRuleEnabled: (id: nat, enabled: bool) -> (Result_1);
+  transform: (input: TransformationInput) -> (TransformationOutput) query;
+  unreadAlertCount: () -> (nat) query;
+  updateAlertRule: (id: nat, input: AlertRuleInput) -> (Result_1);
+  updatePosition: (id: nat, input: PositionInput) -> (Result);
+  updateSettings: (value: Settings) -> ();
 }

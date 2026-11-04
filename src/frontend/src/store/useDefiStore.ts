@@ -33,6 +33,19 @@ export const safeLocalStorage = {
 
 const LS_POLLING_INTERVAL = "defi_polling_interval";
 const LS_SIDEBAR_COLLAPSED = "defi_sidebar_collapsed";
+const LS_THEME = "defi_theme";
+const LS_AUTO_REFRESH = "defi_auto_refresh";
+
+export type ThemePreference = "dark" | "light" | "auto";
+
+function readTheme(): ThemePreference {
+  const raw = safeLocalStorage.get(LS_THEME);
+  return raw === "light" || raw === "auto" ? raw : "dark";
+}
+
+function readAutoRefresh(): boolean {
+  return safeLocalStorage.get(LS_AUTO_REFRESH) !== "false";
+}
 
 function readPollingInterval(): PollingInterval {
   const raw = safeLocalStorage.get(LS_POLLING_INTERVAL);
@@ -69,68 +82,20 @@ function readSidebarCollapsed(): boolean {
 
 export type PollingInterval = 10 | 30 | 60;
 
-/** Per-section polling intervals (seconds). */
-export type SectionPollingKey =
-  | "pools"
-  | "poolComparison"
-  | "apyTracker"
-  | "dashboard";
-
-const DEFAULT_SECTION_POLLING: Record<SectionPollingKey, PollingInterval> = {
-  pools: 30,
-  poolComparison: 30,
-  apyTracker: 60,
-  dashboard: 30,
-};
-
-const LS_SECTION_POLLING = "defi_section_polling";
-
-function readSectionPolling(): Record<SectionPollingKey, PollingInterval> {
-  const raw = safeLocalStorage.get(LS_SECTION_POLLING);
-  if (!raw) return { ...DEFAULT_SECTION_POLLING };
-  try {
-    const parsed = JSON.parse(raw) as Record<
-      SectionPollingKey,
-      PollingInterval
-    >;
-    // Validate each key
-    const validIntervals = new Set<PollingInterval>([10, 30, 60]);
-    const merged = { ...DEFAULT_SECTION_POLLING };
-    for (const k of Object.keys(
-      DEFAULT_SECTION_POLLING,
-    ) as SectionPollingKey[]) {
-      if (validIntervals.has(parsed[k])) merged[k] = parsed[k];
-    }
-    return merged;
-  } catch {
-    return { ...DEFAULT_SECTION_POLLING };
-  }
-}
-
 interface DefiStore {
-  globalSearch: string;
-  setGlobalSearch: (q: string) => void;
-  onboardingDone: boolean;
-  setOnboardingDone: (done: boolean) => void;
-  dismissedErrors: string[];
-  dismissError: (id: string) => void;
   selectedProtocol: Protocol | "all";
   sortConfig: SortConfig;
   pollingInterval: PollingInterval;
   selectedPoolIds: string[];
   sidebarCollapsed: boolean;
-  /** Per-section configurable polling intervals */
-  sectionPollingIntervals: Record<SectionPollingKey, PollingInterval>;
-  /** Unix timestamp (ms) per data source of last successful fetch */
-  lastUpdatedBySource: Record<string, number>;
+  /** Mirrors the backend settings when signed in; local copy otherwise. */
+  theme: ThemePreference;
+  autoRefresh: boolean;
+  setTheme: (theme: ThemePreference) => void;
+  setAutoRefresh: (enabled: boolean) => void;
   setSelectedProtocol: (protocol: Protocol | "all") => void;
   setSortConfig: (config: SortConfig) => void;
   setPollingInterval: (interval: PollingInterval) => void;
-  setSectionPollingInterval: (
-    section: SectionPollingKey,
-    interval: PollingInterval,
-  ) => void;
-  setLastUpdatedBySource: (source: string, timestamp: number) => void;
   togglePoolSelection: (poolId: string) => void;
   clearPoolSelection: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -140,33 +105,23 @@ interface DefiStore {
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 export const useDefiStore = create<DefiStore>((set) => ({
-  globalSearch: "",
-  setGlobalSearch: (q) => set({ globalSearch: q }),
-
-  onboardingDone: (() => {
-    try {
-      return localStorage.getItem("defi_tour_completed") === "1";
-    } catch {
-      return false;
-    }
-  })(),
-  setOnboardingDone: (done) => {
-    set({ onboardingDone: done });
-    if (done) safeLocalStorage.set("defi_tour_completed", "1");
-    else safeLocalStorage.remove("defi_tour_completed");
-  },
-
-  dismissedErrors: [],
-  dismissError: (id) =>
-    set((state) => ({ dismissedErrors: [...state.dismissedErrors, id] })),
-
   selectedProtocol: "all",
   sortConfig: { key: "tvl", direction: "desc" },
   pollingInterval: readPollingInterval(),
   selectedPoolIds: [],
   sidebarCollapsed: readSidebarCollapsed(),
-  sectionPollingIntervals: readSectionPolling(),
-  lastUpdatedBySource: {},
+  theme: readTheme(),
+  autoRefresh: readAutoRefresh(),
+
+  setTheme: (theme) => {
+    set({ theme });
+    safeLocalStorage.set(LS_THEME, theme);
+  },
+
+  setAutoRefresh: (enabled) => {
+    set({ autoRefresh: enabled });
+    safeLocalStorage.set(LS_AUTO_REFRESH, String(enabled));
+  },
 
   setSelectedProtocol: (protocol) => set({ selectedProtocol: protocol }),
 
@@ -176,21 +131,6 @@ export const useDefiStore = create<DefiStore>((set) => ({
     set({ pollingInterval: interval });
     safeLocalStorage.set(LS_POLLING_INTERVAL, JSON.stringify(interval));
   },
-
-  setSectionPollingInterval: (section, interval) =>
-    set((state) => {
-      const next = { ...state.sectionPollingIntervals, [section]: interval };
-      safeLocalStorage.set(LS_SECTION_POLLING, JSON.stringify(next));
-      return { sectionPollingIntervals: next };
-    }),
-
-  setLastUpdatedBySource: (source, timestamp) =>
-    set((state) => ({
-      lastUpdatedBySource: {
-        ...state.lastUpdatedBySource,
-        [source]: timestamp,
-      },
-    })),
 
   togglePoolSelection: (poolId) =>
     set((state) => {

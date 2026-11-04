@@ -52,15 +52,29 @@ export const PROTOCOL_METADATA: Record<string, ProtocolMetadata> = {
   },
 };
 
-function generateAPYHistory(
+/** Small seeded PRNG (mulberry32) so demo history is identical on every load. */
+function seededRandom(seed: number): () => number {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Deterministic demo APY history. Always presented as Demo data. */
+export function generateAPYHistory(
   baseAPY: number,
   days: number,
 ): { date: string; apy: number }[] {
-  const now = new Date();
+  const random = seededRandom(Math.round(baseAPY * 100) * 31 + days);
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
   return Array.from({ length: days }, (_, i) => {
-    const d = new Date(now);
-    d.setDate(d.getDate() - (days - 1 - i));
-    const noise = (Math.random() - 0.5) * baseAPY * 0.3;
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - (days - 1 - i));
+    const noise = (random() - 0.5) * baseAPY * 0.3;
     return {
       date: d.toISOString().slice(0, 10),
       apy: Math.max(0.5, Number.parseFloat((baseAPY + noise).toFixed(2))),

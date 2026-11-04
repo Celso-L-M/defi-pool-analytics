@@ -1,1616 +1,947 @@
-import { Breadcrumb } from "@/components/Breadcrumb";
-import { DataSourceBadge } from "@/components/DataSourceBadge";
-import { ErrorBanner } from "@/components/ErrorBanner";
-import { HelpIcon } from "@/components/HelpIcon";
-import { PercentChange } from "@/components/PercentChange";
-import { ProtocolBadge } from "@/components/ProtocolBadge";
-import { SkeletonTable } from "@/components/SkeletonLoaders";
-import { Sparkline } from "@/components/Sparkline";
+import { EmptyState, ErrorState, LoadingState } from "@/components/DataStates";
+import { DemoBadge } from "@/components/DemoBadge";
+import { RiskBadge } from "@/components/RiskBadge";
+import { SignInPrompt } from "@/components/SignInPrompt";
 import { Button } from "@/components/ui/button";
-import { MOCK_POOLS, PROTOCOL_METADATA } from "@/data/mockData";
-import { safeLocalStorage, useDefiStore } from "@/store/useDefiStore";
-import type { ILRisk, Pool, Protocol } from "@/types/defi";
-import { exportCSV, exportPDF } from "@/utils/exportUtils";
-import { toast } from "@/utils/toast";
+import { Input } from "@/components/ui/input";
+import { useAuth } from "@/hooks/useAuth";
+import { type LiveResult, usePoolHistory, usePools } from "@/hooks/useLiveData";
 import {
-  ArrowDownUp,
-  ArrowUpDown,
-  Bell,
-  BellOff,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
-  Columns,
+  useAddToWatchlist,
+  useRemoveFromWatchlist,
+  useWatchlist,
+} from "@/hooks/useQueries";
+import { cn } from "@/lib/utils";
+import { useDefiStore } from "@/store/useDefiStore";
+import type { Pool, PoolHistoryPoint } from "@/types/defi";
+import { exportCSV, exportPDF } from "@/utils/exportUtils";
+import { computeRiskScore } from "@/utils/riskScore";
+import { toast } from "@/utils/toast";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import {
+  Check,
   FileText,
-  Info,
+  Link2,
+  Plus,
+  RefreshCw,
   Search,
   Star,
+  TriangleAlert,
+  X,
 } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
   CartesianGrid,
-  Cell,
-  Legend,
   Line,
   LineChart,
-  RadarChart,
   ResponsiveContainer,
   Tooltip,
+  type TooltipProps,
   XAxis,
   YAxis,
 } from "recharts";
+import type {
+  NameType,
+  ValueType,
+} from "recharts/types/component/DefaultTooltipContent";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+const MAX_POOLS = 4;
+const HISTORY_DAYS = 90;
 
-type SortKey =
-  | "name"
-  | "protocol"
-  | "chain"
-  | "tvl"
-  | "apy24h"
-  | "apy7d"
-  | "apy30d"
-  | "volume24h"
-  | "fees24h"
-  | "ilRisk";
+const SERIES = [
+  { line: "stroke-chart-1", dot: "bg-chart-1" },
+  { line: "stroke-chart-2", dot: "bg-chart-2" },
+  { line: "stroke-chart-4", dot: "bg-chart-4" },
+  { line: "stroke-chart-5", dot: "bg-chart-5" },
+] as const;
 
-interface ColDef {
-  key: SortKey;
+const CHART_STYLE =
+  "[&_.recharts-cartesian-grid_line]:stroke-border [&_.recharts-cartesian-axis-line]:stroke-border [&_.recharts-cartesian-axis-tick-line]:stroke-border [&_.recharts-cartesian-axis-tick-value]:fill-muted-foreground";
+
+function usd(value: number): string {
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
+  if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
+  if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
+  return `$${value.toFixed(0)}`;
+}
+
+function pct(value: number): string {
+  return `${value.toFixed(2)}%`;
+}
+
+function parseIds(raw: string): string[] {
+  const seen = new Set<string>();
+  for (const part of raw.split(",")) {
+    const id = part.trim();
+    if (id) seen.add(id);
+  }
+  return [...seen];
+}
+
+function poolKey(pool: Pool): string {
+  return pool.poolId ?? pool.id;
+}
+
+interface MetricRow {
+  key: string;
   label: string;
-  align?: "right" | "left";
-  mobileHidden?: boolean;
-  helpTerm?: "APY" | "TVL" | "ImpermanentLoss";
+  value: (pool: Pool) => number;
+  format: (value: number) => string;
+  better: "high" | "low";
 }
 
-// ─── Constants ─────────────────────────────────────────────────────────────────
-
-const PROTOCOLS: { id: Protocol | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "uniswap", label: "Uniswap" },
-  { id: "pancakeswap", label: "PancakeSwap" },
-  { id: "raydium", label: "Raydium" },
-  { id: "icp", label: "ICP" },
+const METRICS: MetricRow[] = [
+  {
+    key: "apy",
+    label: "APY (now)",
+    value: (p) => p.apy.current,
+    format: pct,
+    better: "high",
+  },
+  {
+    key: "apy7d",
+    label: "APY 7d avg",
+    value: (p) => p.apy.day7Avg,
+    format: pct,
+    better: "high",
+  },
+  {
+    key: "apy30d",
+    label: "APY 30d avg",
+    value: (p) => p.apy.day30Avg,
+    format: pct,
+    better: "high",
+  },
+  {
+    key: "tvl",
+    label: "TVL",
+    value: (p) => p.stats.tvl,
+    format: usd,
+    better: "high",
+  },
+  {
+    key: "volume",
+    label: "24h volume",
+    value: (p) => p.stats.volume24h,
+    format: usd,
+    better: "high",
+  },
+  {
+    key: "fees",
+    label: "Est. 24h fees",
+    value: (p) => p.stats.fees24h,
+    format: usd,
+    better: "high",
+  },
 ];
 
-const PROTOCOL_TO_SOURCE: Record<Protocol, string> = {
-  uniswap: "Uniswap",
-  pancakeswap: "PancakeSwap",
-  raydium: "Raydium",
-  icp: "ICPSwap",
-};
-
-const IL_RISK_ORDER: Record<ILRisk, number> = { low: 0, medium: 1, high: 2 };
-const PAGE_SIZE = 10;
-const LS_WATCHLIST = "defi_watchlist";
-const LS_ALERTS = "defi_price_alerts";
-
-const COLUMNS: ColDef[] = [
-  { key: "name", label: "Pool Name" },
-  { key: "protocol", label: "Protocol", mobileHidden: true },
-  { key: "chain", label: "Chain", mobileHidden: true },
-  { key: "tvl", label: "TVL", align: "right", helpTerm: "TVL" },
-  { key: "apy24h", label: "APY 24h", align: "right", helpTerm: "APY" },
-  { key: "apy7d", label: "APY 7d", align: "right", mobileHidden: true },
-  { key: "apy30d", label: "APY 30d", align: "right", mobileHidden: true },
-  { key: "volume24h", label: "24h Volume", align: "right", mobileHidden: true },
-  { key: "fees24h", label: "Daily Fees", align: "right", mobileHidden: true },
-  { key: "ilRisk", label: "IL Risk", helpTerm: "ImpermanentLoss" },
-];
-
-// ─── Formatters ────────────────────────────────────────────────────────────────
-
-function formatTVL(val: number): string {
-  if (val >= 1_000_000_000) return `$${(val / 1_000_000_000).toFixed(1)}B`;
-  if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(1)}M`;
-  return `$${(val / 1_000).toFixed(0)}K`;
+function bestIndex(values: number[], better: "high" | "low"): number {
+  if (values.length < 2 || new Set(values).size < 2) return -1;
+  const target = better === "high" ? Math.max(...values) : Math.min(...values);
+  return values.indexOf(target);
 }
 
-function formatFees(val: number): string {
-  if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(2)}M`;
-  if (val >= 1_000) return `$${(val / 1_000).toFixed(1)}K`;
-  return `$${val.toFixed(0)}`;
-}
-
-function formatRelativeTime(ts: number): string {
-  const diffMs = Date.now() - ts;
-  const diffS = Math.floor(diffMs / 1000);
-  if (diffS < 60) return `${diffS}s ago`;
-  const diffM = Math.floor(diffS / 60);
-  if (diffM < 60) return `${diffM}m ago`;
-  const diffH = Math.floor(diffM / 60);
-  return `${diffH}h ago`;
-}
-
-// ─── IL Badge ──────────────────────────────────────────────────────────────────
-
-const IL_BADGE_STYLES: Record<
-  ILRisk,
-  { background: string; border: string; color: string; textShadow?: string }
-> = {
-  low: {
-    background: "rgba(0,255,136,0.08)",
-    border: "1px solid rgba(0,255,136,0.25)",
-    color: "#00FF88",
-    textShadow: "0 0 6px rgba(0,255,136,0.4)",
-  },
-  medium: {
-    background: "rgba(255,170,0,0.08)",
-    border: "1px solid rgba(255,170,0,0.25)",
-    color: "#FFAA00",
-  },
-  high: {
-    background: "rgba(255,68,102,0.08)",
-    border: "1px solid rgba(255,68,102,0.25)",
-    color: "#FF4466",
-    textShadow: "0 0 6px rgba(255,68,102,0.4)",
-  },
-};
-
-function ILBadge({ risk }: { risk: ILRisk }) {
-  return (
-    <span
-      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-      style={IL_BADGE_STYLES[risk]}
-    >
-      {risk.charAt(0).toUpperCase() + risk.slice(1)}
-    </span>
-  );
-}
-
-// ─── Sort Icon ─────────────────────────────────────────────────────────────────
-
-function SortIcon({
-  active,
-  direction,
-}: { active: boolean; direction: "asc" | "desc" }) {
-  if (!active)
-    return (
-      <ArrowDownUp
-        className="w-3.5 h-3.5"
-        style={{ color: "rgba(255,255,255,0.2)" }}
-      />
-    );
-  return direction === "asc" ? (
-    <ChevronUp className="w-3.5 h-3.5" style={{ color: "#00A3FF" }} />
-  ) : (
-    <ChevronDown className="w-3.5 h-3.5" style={{ color: "#00A3FF" }} />
-  );
-}
-
-// ─── Custom Recharts Tooltip ────────────────────────────────────────────────────
-
-interface ChartTooltipPayload {
-  name?: string;
-  value?: number;
-  dataKey?: string;
-  color?: string;
-}
-
-interface CustomTooltipProps {
-  active?: boolean;
-  payload?: ChartTooltipPayload[];
-  label?: string;
-  valueFormatter?: (v: number) => string;
-  valueLabel?: string;
-}
-
-function GlassTooltip({
+function HistoryTooltip({
   active,
   payload,
   label,
-  valueFormatter,
-  valueLabel,
-}: CustomTooltipProps) {
+  names,
+}: TooltipProps<ValueType, NameType> & { names: string[] }) {
   if (!active || !payload?.length) return null;
-  const item = payload[0];
-  const val = item.value ?? 0;
-  const fmt = valueFormatter ? valueFormatter(val) : val.toFixed(2);
-
   return (
-    <div
-      className="rounded-xl px-3 py-2.5 min-w-[140px]"
-      style={{
-        background: "rgba(10,10,10,0.97)",
-        backdropFilter: "blur(16px)",
-        border: "1px solid rgba(0,163,255,0.35)",
-        boxShadow: "0 8px 32px rgba(0,0,0,0.6), 0 0 12px rgba(0,163,255,0.15)",
-      }}
-    >
-      {label && (
-        <p className="text-[10px] font-mono mb-1" style={{ color: "#505050" }}>
-          {label}
-        </p>
-      )}
-      {item.name && (
-        <p
-          className="text-[11px] font-semibold mb-0.5"
-          style={{ color: "#c0c0c0" }}
-        >
-          {item.name}
-        </p>
-      )}
-      <p
-        className="text-sm font-mono font-bold"
-        style={{
-          color: item.color ?? "#00A3FF",
-          textShadow: `0 0 8px ${item.color ?? "#00A3FF"}80`,
-        }}
-      >
-        {valueLabel ?? ""}
-        {fmt}
-      </p>
+    <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground">
+      <p className="mb-1 font-mono text-muted-foreground">{label}</p>
+      {payload.map((entry) => {
+        const idx = Number(String(entry.dataKey).slice(1));
+        return (
+          <p key={String(entry.dataKey)} className="flex items-center gap-2">
+            <span
+              className={cn("h-2 w-2 rounded-full", SERIES[idx]?.dot)}
+              aria-hidden
+            />
+            <span className="max-w-[10rem] truncate">{names[idx]}</span>
+            <span className="ml-auto pl-3 font-mono tabular-nums">
+              {typeof entry.value === "number" ? pct(entry.value) : "—"}
+            </span>
+          </p>
+        );
+      })}
     </div>
   );
 }
 
-// Multi-series tooltip
-function MultiGlassTooltip({ active, payload, label }: CustomTooltipProps) {
-  if (!active || !payload?.length) return null;
+interface HistoryChartProps {
+  pools: Pool[];
+  histories: LiveResult<PoolHistoryPoint[]>[];
+}
+
+function HistoryChart({ pools, histories }: HistoryChartProps) {
+  const names = pools.map((p) => p.name);
+  const rows = new Map<string, Record<string, string | number>>();
+  histories.forEach((history, i) => {
+    for (const point of history.data.slice(-HISTORY_DAYS)) {
+      const row = rows.get(point.date) ?? { date: point.date };
+      row[`p${i}`] = point.apy;
+      rows.set(point.date, row);
+    }
+  });
+  const data = [...rows.values()].sort((a, b) =>
+    String(a.date).localeCompare(String(b.date)),
+  );
+  const anyDemo = histories.some((h) => h.isDemo);
+  const loading = histories.some((h) => h.isLoading);
+  const failed = histories
+    .map((h, i) => ({ h, pool: pools[i] }))
+    .filter(({ h }) => h.isError);
+
   return (
-    <div
-      className="rounded-xl px-3 py-2.5 min-w-[160px]"
-      style={{
-        background: "rgba(10,10,10,0.97)",
-        backdropFilter: "blur(16px)",
-        border: "1px solid rgba(0,163,255,0.35)",
-        boxShadow: "0 8px 32px rgba(0,0,0,0.6), 0 0 12px rgba(0,163,255,0.15)",
-      }}
+    <section
+      data-ocid="comparison.history_panel"
+      className="rounded-lg border border-border bg-card p-4"
+      aria-labelledby="history-heading"
     >
-      {label && (
-        <p
-          className="text-[10px] font-mono mb-1.5"
-          style={{ color: "#505050" }}
-        >
-          {label}
-        </p>
-      )}
-      {payload.map((item) => (
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2
+            id="history-heading"
+            className="font-display text-sm font-semibold uppercase tracking-wider"
+          >
+            APY history · last {HISTORY_DAYS} days
+          </h2>
+          <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {pools.map((pool, i) => (
+              <li key={pool.id} className="flex items-center gap-1.5">
+                <span
+                  className={cn("h-2 w-2 rounded-full", SERIES[i].dot)}
+                  aria-hidden
+                />
+                <span className="max-w-[12rem] truncate">{pool.name}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        {anyDemo && <DemoBadge />}
+      </div>
+
+      {failed.map(({ h, pool }) => (
         <div
-          key={item.name ?? item.dataKey}
-          className="flex items-center justify-between gap-3 mb-0.5"
+          key={pool.id}
+          data-ocid="comparison.history_error"
+          role="alert"
+          className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs"
         >
-          <span
-            className="text-[11px]"
-            style={{ color: item.color ?? "#c0c0c0" }}
-          >
-            {item.name}
+          <span>
+            Live history for <strong>{pool.name}</strong> could not be loaded
+            {h.isDemo ? "; showing demo history where available." : "."}
           </span>
-          <span
-            className="text-[11px] font-mono font-semibold"
-            style={{ color: item.color ?? "#00A3FF" }}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-ocid="comparison.history_retry_button"
+            onClick={h.refetch}
           >
-            {typeof item.value === "number"
-              ? item.value.toFixed(2)
-              : item.value}
-          </span>
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+            Retry
+          </Button>
         </div>
       ))}
-    </div>
-  );
-}
 
-// ─── Sort Helper ───────────────────────────────────────────────────────────────
-
-function sortPools(pools: Pool[], key: SortKey, dir: "asc" | "desc"): Pool[] {
-  return [...pools].sort((a, b) => {
-    let av: number | string = 0;
-    let bv: number | string = 0;
-    switch (key) {
-      case "name":
-        av = a.name;
-        bv = b.name;
-        break;
-      case "protocol":
-        av = a.protocol;
-        bv = b.protocol;
-        break;
-      case "chain":
-        av = a.chain;
-        bv = b.chain;
-        break;
-      case "tvl":
-        av = a.stats.tvl;
-        bv = b.stats.tvl;
-        break;
-      case "apy24h":
-        av = a.apy.current;
-        bv = b.apy.current;
-        break;
-      case "apy7d":
-        av = a.apy.day7Avg;
-        bv = b.apy.day7Avg;
-        break;
-      case "apy30d":
-        av = a.apy.day30Avg;
-        bv = b.apy.day30Avg;
-        break;
-      case "volume24h":
-        av = a.stats.volume24h;
-        bv = b.stats.volume24h;
-        break;
-      case "fees24h":
-        av = a.stats.fees24h;
-        bv = b.stats.fees24h;
-        break;
-      case "ilRisk":
-        av = IL_RISK_ORDER[a.ilRisk];
-        bv = IL_RISK_ORDER[b.ilRisk];
-        break;
-    }
-    if (typeof av === "string" && typeof bv === "string")
-      return dir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
-    return dir === "asc"
-      ? (av as number) - (bv as number)
-      : (bv as number) - (av as number);
-  });
-}
-
-// ─── Sparkline data helper (7-day APY trend) ───────────────────────────────────
-
-function getSparklineData(pool: Pool): number[] {
-  if (pool.apyTrend?.day7?.length) {
-    return pool.apyTrend.day7.map((d) => d.apy);
-  }
-  // Fallback: generate synthetic from averages
-  const base = pool.apy.day7Avg;
-  return Array.from({ length: 7 }, (_, i) => {
-    const noise = (((i * 7919 + 1) % 17) / 17 - 0.5) * base * 0.3;
-    return Math.max(0.1, base + noise);
-  });
-}
-
-function sparklineColor(pool: Pool): string {
-  const data = getSparklineData(pool);
-  if (data.length < 2) return "#00A3FF";
-  return data[data.length - 1] >= data[0] ? "#00FF88" : "#FF4466";
-}
-
-// ─── Watchlist Card ─────────────────────────────────────────────────────────────
-
-function WatchlistPoolCard({
-  pool,
-  hasAlert,
-  onToggleAlert,
-  onRemove,
-}: {
-  pool: Pool;
-  hasAlert: boolean;
-  onToggleAlert: () => void;
-  onRemove: () => void;
-}) {
-  return (
-    <div
-      className="flex items-center gap-3 rounded-lg px-3 py-2.5 min-w-[200px] transition-all duration-200"
-      style={{
-        background: "rgba(0,163,255,0.04)",
-        border: "1px solid rgba(0,163,255,0.15)",
-      }}
-    >
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span
-            className="font-medium text-sm truncate"
-            style={{ color: "#e0e0e0" }}
-          >
-            {pool.name}
-          </span>
-          <ILBadge risk={pool.ilRisk} />
-        </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          <ProtocolBadge protocol={pool.protocol} size="sm" />
-          <span
-            className="font-mono text-xs"
-            style={{
-              color: "#00FF88",
-              textShadow: "0 0 6px rgba(0,255,136,0.5)",
-            }}
-          >
-            {pool.apy.current.toFixed(2)}%
-          </span>
-          <span className="text-xs" style={{ color: "#505050" }}>
-            {formatTVL(pool.stats.tvl)} TVL
-          </span>
-        </div>
-      </div>
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <button
-          type="button"
-          data-ocid={`watchlist.alert_toggle.${pool.id}`}
-          onClick={onToggleAlert}
-          aria-label={hasAlert ? "Disable price alert" : "Enable price alert"}
-          className="w-7 h-7 rounded-md flex items-center justify-center transition-all duration-200"
-          style={{
-            background: hasAlert
-              ? "rgba(255,170,0,0.12)"
-              : "rgba(255,255,255,0.03)",
-            border: hasAlert
-              ? "1px solid rgba(255,170,0,0.3)"
-              : "1px solid transparent",
-            color: hasAlert ? "#FFAA00" : "#505050",
-          }}
-        >
-          {hasAlert ? (
-            <Bell className="w-3.5 h-3.5" />
-          ) : (
-            <BellOff className="w-3.5 h-3.5" />
-          )}
-        </button>
-        <button
-          type="button"
-          data-ocid={`watchlist.remove_button.${pool.id}`}
-          onClick={onRemove}
-          aria-label="Remove from watchlist"
-          className="w-7 h-7 rounded-md flex items-center justify-center transition-all duration-200"
-          style={{
-            background: "rgba(0,255,136,0.08)",
-            border: "1px solid rgba(0,255,136,0.2)",
-            color: "#00FF88",
-          }}
-        >
-          <Star className="w-3.5 h-3.5 fill-current" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Table Row ─────────────────────────────────────────────────────────────────
-
-function TableRow({
-  pool,
-  rowNum,
-  isWatched,
-  showAllColumns,
-  onToggleWatchlist,
-}: {
-  pool: Pool;
-  rowNum: number;
-  isWatched: boolean;
-  page: number;
-  showAllColumns: boolean;
-  onToggleWatchlist: () => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const sparkData = getSparklineData(pool);
-  const sparkColor = sparklineColor(pool);
-  const sourceName = PROTOCOL_TO_SOURCE[pool.protocol] as
-    | "ICPSwap"
-    | "KongSwap"
-    | "Uniswap"
-    | "PancakeSwap"
-    | "Raydium";
-
-  return (
-    <tr
-      data-ocid={`pool-comparison.item.${rowNum}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        borderBottom: "1px solid rgba(0,163,255,0.06)",
-        background: hovered ? "rgba(0,163,255,0.05)" : "transparent",
-        transition: "background 0.15s ease",
-        borderLeft: isWatched
-          ? "2px solid rgba(0,163,255,0.4)"
-          : "2px solid transparent",
-      }}
-    >
-      {/* Star */}
-      <td className="px-2 py-3">
-        <button
-          type="button"
-          data-ocid={`pool-comparison.star.${pool.id}`}
-          onClick={onToggleWatchlist}
-          aria-label={isWatched ? "Remove from watchlist" : "Add to watchlist"}
-          className="w-7 h-7 rounded-md flex items-center justify-center transition-all duration-200"
-          style={{
-            color: isWatched ? "#00FF88" : "#303030",
-            textShadow: isWatched ? "0 0 6px rgba(0,255,136,0.6)" : "none",
-          }}
-        >
-          <Star
-            className="w-4 h-4"
-            style={{ fill: isWatched ? "#00FF88" : "transparent" }}
-          />
-        </button>
-      </td>
-
-      {/* Pool Name */}
-      <td className="px-4 py-3">
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
-            <span className="font-medium" style={{ color: "#d0d0d0" }}>
-              {pool.name}
-            </span>
-            <DataSourceBadge
-              source={sourceName}
-              showTimestamp={false}
-              status={pool.dataSource === "demo" ? "demo" : "live"}
-            />
-          </div>
-          <span
-            className="text-xs font-mono truncate max-w-[140px]"
-            style={{ color: "#404040" }}
-          >
-            {pool.address.length > 16
-              ? `${pool.address.slice(0, 8)}...${pool.address.slice(-6)}`
-              : pool.address}
-          </span>
-        </div>
-      </td>
-
-      {/* Protocol — hidden on mobile unless showAllColumns */}
-      <td
-        className={`px-4 py-3${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <ProtocolBadge protocol={pool.protocol} size="sm" />
-      </td>
-
-      {/* Chain — hidden on mobile */}
-      <td
-        className={`px-4 py-3${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <span
-          className="text-xs whitespace-nowrap uppercase"
-          style={{ color: "#505050", letterSpacing: "0.04em" }}
-        >
-          {pool.chain}
-        </span>
-      </td>
-
-      {/* TVL */}
-      <td className="px-4 py-3 text-right">
-        <span
-          className="font-mono tabular-nums"
-          style={{
-            color: "#00A3FF",
-            textShadow: "0 0 6px rgba(0,163,255,0.35)",
-          }}
-        >
-          {formatTVL(pool.stats.tvl)}
-        </span>
-      </td>
-
-      {/* APY 24h with PercentChange */}
-      <td className="px-4 py-3 text-right">
-        <div className="flex flex-col items-end gap-0.5">
-          <span
-            className="font-mono font-semibold"
-            style={{
-              color: "#00FF88",
-              textShadow: "0 0 8px rgba(0,255,136,0.5)",
-            }}
-          >
-            {pool.apy.current.toFixed(2)}%
-          </span>
-          <PercentChange value={pool.apy.day1Change} size="sm" />
-        </div>
-      </td>
-
-      {/* APY 7d — hidden on mobile */}
-      <td
-        className={`px-4 py-3 text-right${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <span className="font-mono" style={{ color: "#808080" }}>
-          {pool.apy.day7Avg.toFixed(2)}%
-        </span>
-      </td>
-
-      {/* APY 30d — hidden on mobile */}
-      <td
-        className={`px-4 py-3 text-right${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <span className="font-mono" style={{ color: "#606060" }}>
-          {pool.apy.day30Avg.toFixed(2)}%
-        </span>
-      </td>
-
-      {/* Volume — hidden on mobile */}
-      <td
-        className={`px-4 py-3 text-right whitespace-nowrap${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <span className="font-mono tabular-nums" style={{ color: "#606060" }}>
-          {formatTVL(pool.stats.volume24h)}
-        </span>
-      </td>
-
-      {/* Fees — hidden on mobile */}
-      <td
-        className={`px-4 py-3 text-right whitespace-nowrap${showAllColumns ? "" : " hidden sm:table-cell"}`}
-      >
-        <span className="font-mono tabular-nums" style={{ color: "#606060" }}>
-          {formatFees(pool.stats.fees24h)}
-        </span>
-      </td>
-
-      {/* IL Risk */}
-      <td className="px-4 py-3">
-        <ILBadge risk={pool.ilRisk} />
-      </td>
-
-      {/* Sparkline trend */}
-      <td className="px-3 py-3">
-        <Sparkline data={sparkData} color={sparkColor} width={72} height={28} />
-      </td>
-    </tr>
-  );
-}
-
-// ─── Chart Panel Wrapper ────────────────────────────────────────────────────────
-
-function ChartPanel({
-  title,
-  source,
-  lastUpdatedTs,
-  children,
-}: {
-  title: string;
-  source:
-    | "ICPSwap"
-    | "KongSwap"
-    | "Uniswap"
-    | "PancakeSwap"
-    | "Raydium"
-    | "Binance"
-    | "Mock";
-  lastUpdatedTs?: number;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className="rounded-xl p-4"
-      style={{
-        background: "rgba(13,13,13,0.8)",
-        backdropFilter: "blur(10px)",
-        border: "1px solid rgba(0,163,255,0.15)",
-        boxShadow: "0 4px 32px rgba(0,0,0,0.4)",
-      }}
-    >
-      <div className="flex items-center justify-between mb-3 gap-2">
-        <h3
-          className="text-xs font-semibold uppercase tracking-widest"
-          style={{ color: "#808080" }}
-        >
-          {title}
-        </h3>
-        <div className="flex items-center gap-2">
-          {lastUpdatedTs && (
-            <span
-              className="text-[10px] font-mono"
-              style={{ color: "#404040" }}
+      {loading && data.length === 0 ? (
+        <LoadingState label="Loading APY history…" />
+      ) : data.length === 0 ? (
+        <EmptyState
+          title="No APY history available"
+          description="The data source returned no daily history for the selected pools."
+        />
+      ) : (
+        <div className={cn("h-72 w-full", CHART_STYLE)}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={data}
+              margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
             >
-              {formatRelativeTime(lastUpdatedTs)}
-            </span>
-          )}
-          <DataSourceBadge
-            source={source}
-            lastUpdated={lastUpdatedTs ? new Date(lastUpdatedTs) : null}
-            showTimestamp={false}
-          />
-        </div>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-// ─── APY Trend Chart ───────────────────────────────────────────────────────────
-
-function APYTrendChart({ pools }: { pools: Pool[] }) {
-  const top5 = pools.slice(0, 5);
-  const COLORS = ["#00FF88", "#00A3FF", "#FF4466", "#FFAA00", "#9945FF"];
-
-  // Build date-keyed data from day7 history
-  const allDates = Array.from(
-    new Set(top5.flatMap((p) => (p.apyTrend?.day7 ?? []).map((d) => d.date))),
-  ).sort();
-
-  const chartData = allDates.map((date) => {
-    const row: Record<string, string | number> = { date };
-    for (const pool of top5) {
-      const pt = pool.apyTrend?.day7?.find((d) => d.date === date);
-      row[pool.name] = pt ? pt.apy : pool.apy.day7Avg;
-    }
-    return row;
-  });
-
-  return (
-    <ResponsiveContainer width="100%" height={180}>
-      <LineChart
-        data={chartData}
-        margin={{ top: 4, right: 4, left: -20, bottom: 0 }}
-      >
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-        <XAxis
-          dataKey="date"
-          tick={{ fill: "#404040", fontSize: 9 }}
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(v: string) => v.slice(5)}
-        />
-        <YAxis
-          tick={{ fill: "#404040", fontSize: 9 }}
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(v: number) => `${v.toFixed(0)}%`}
-        />
-        <Tooltip content={<MultiGlassTooltip />} />
-        <Legend
-          wrapperStyle={{
-            fontSize: "10px",
-            color: "#606060",
-            paddingTop: "8px",
-          }}
-        />
-        {top5.map((pool, i) => (
-          <Line
-            key={pool.id}
-            type="monotone"
-            dataKey={pool.name}
-            stroke={COLORS[i % COLORS.length]}
-            strokeWidth={1.5}
-            dot={false}
-            activeDot={{ r: 3, fill: COLORS[i % COLORS.length] }}
-          />
-        ))}
-      </LineChart>
-    </ResponsiveContainer>
-  );
-}
-
-// ─── Fee Comparison Chart ───────────────────────────────────────────────────────
-
-function FeeComparisonChart({ pools }: { pools: Pool[] }) {
-  const top8 = pools.slice(0, 8);
-  const chartData = top8.map((p) => ({
-    name: p.name.length > 10 ? `${p.name.slice(0, 10)}…` : p.name,
-    fees: p.stats.fees24h,
-    feeRate: p.stats.feeRate * 100,
-    pool: p,
-  }));
-
-  return (
-    <ResponsiveContainer width="100%" height={180}>
-      <BarChart
-        data={chartData}
-        margin={{ top: 4, right: 4, left: -20, bottom: 0 }}
-      >
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-        <XAxis
-          dataKey="name"
-          tick={{ fill: "#404040", fontSize: 8 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <YAxis
-          tick={{ fill: "#404040", fontSize: 9 }}
-          tickLine={false}
-          axisLine={false}
-          tickFormatter={(v: number) => formatFees(v)}
-        />
-        <Tooltip
-          content={
-            <GlassTooltip
-              valueFormatter={(v) => formatFees(v)}
-              valueLabel="Fees: "
-            />
-          }
-        />
-        <Bar dataKey="fees" radius={[3, 3, 0, 0]}>
-          {chartData.map((entry) => (
-            <Cell
-              key={entry.name}
-              fill={`rgba(0,255,136,${0.4 + (chartData.indexOf(entry) / chartData.length) * 0.4})`}
-              stroke="rgba(0,255,136,0.3)"
-              strokeWidth={1}
-            />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
-// ─── Security Score Chart ───────────────────────────────────────────────────────
-
-function SecurityScoreChart({ pools }: { pools: Pool[] }) {
-  const top8 = pools.slice(0, 8);
-  const chartData = top8.map((p) => ({
-    name: p.name.length > 10 ? `${p.name.slice(0, 10)}…` : p.name,
-    score:
-      p.securityScore ?? Math.round(60 + Math.abs(p.id.charCodeAt(0) % 40)),
-  }));
-
-  return (
-    <ResponsiveContainer width="100%" height={180}>
-      <BarChart
-        data={chartData}
-        margin={{ top: 4, right: 4, left: -20, bottom: 0 }}
-      >
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-        <XAxis
-          dataKey="name"
-          tick={{ fill: "#404040", fontSize: 8 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <YAxis
-          domain={[0, 100]}
-          tick={{ fill: "#404040", fontSize: 9 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <Tooltip
-          content={
-            <GlassTooltip
-              valueFormatter={(v) => `${v.toFixed(0)} / 100`}
-              valueLabel="Score: "
-            />
-          }
-        />
-        <Bar dataKey="score" radius={[3, 3, 0, 0]}>
-          {chartData.map((entry) => {
-            const pct = entry.score / 100;
-            const color =
-              pct >= 0.75
-                ? `rgba(0,255,136,${0.5 + pct * 0.4})`
-                : pct >= 0.5
-                  ? `rgba(255,170,0,${0.5 + pct * 0.4})`
-                  : `rgba(255,68,102,${0.5 + pct * 0.4})`;
-            return (
-              <Cell
-                key={entry.name}
-                fill={color}
-                stroke={color.replace(/,[^,]+\)$/, ",0.6)")}
-                strokeWidth={1}
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 11 }}
+                tickFormatter={(v: string) => v.slice(5)}
+                minTickGap={28}
               />
-            );
-          })}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+              <YAxis
+                tick={{ fontSize: 11 }}
+                width={52}
+                tickFormatter={(v: number) => `${v}%`}
+              />
+              <Tooltip
+                content={(props) => <HistoryTooltip {...props} names={names} />}
+              />
+              {pools.map((pool, i) => (
+                <Line
+                  key={pool.id}
+                  type="monotone"
+                  dataKey={`p${i}`}
+                  className={SERIES[i].line}
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </section>
   );
 }
-
-// ─── Main Page ─────────────────────────────────────────────────────────────────
 
 export function PoolComparisonPage() {
-  const { dismissedErrors, dismissError, lastUpdatedBySource } = useDefiStore();
+  const search = useSearch({ strict: false }) as Record<string, unknown>;
+  const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
+  const pools = usePools();
+  const watchlist = useWatchlist();
+  const addWatch = useAddToWatchlist();
+  const removeWatch = useRemoveFromWatchlist();
 
-  const [isLoading, setIsLoading] = useState(true);
-  const [sortKey, setSortKey] = useState<SortKey>("tvl");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [activeProtocol, setActiveProtocol] = useState<Protocol | "all">("all");
-  const [search, setSearch] = useState("");
-  const [searchFocused, setSearchFocused] = useState(false);
-  const [page, setPage] = useState(1);
-  const [showTooltip, setShowTooltip] = useState(false);
-  const [showAllColumns, setShowAllColumns] = useState(false);
+  const rawParam = search.pools == null ? "" : String(search.pools);
+  const requested = useMemo(() => parseIds(rawParam), [rawParam]);
+  const selectedIds = useMemo(() => requested.slice(0, MAX_POOLS), [requested]);
+  const ignoredIds = useMemo(() => requested.slice(MAX_POOLS), [requested]);
 
-  const [watchlist, setWatchlist] = useState<string[]>(() => {
-    try {
-      const raw = safeLocalStorage.get(LS_WATCHLIST, "[]");
-      return JSON.parse(raw ?? "[]") as string[];
-    } catch {
-      return [];
-    }
-  });
-  const [alertPools, setAlertPools] = useState<string[]>(() => {
-    try {
-      const raw = safeLocalStorage.get(LS_ALERTS, "[]");
-      return JSON.parse(raw ?? "[]") as string[];
-    } catch {
-      return [];
-    }
-  });
-
-  useEffect(() => {
-    safeLocalStorage.set(LS_WATCHLIST, JSON.stringify(watchlist));
-  }, [watchlist]);
-  useEffect(() => {
-    safeLocalStorage.set(LS_ALERTS, JSON.stringify(alertPools));
-  }, [alertPools]);
-
-  React.useEffect(() => {
-    const t = setTimeout(() => setIsLoading(false), 700);
-    return () => clearTimeout(t);
-  }, []);
-
-  // Detect which data sources have demo/failed pools
-  const demoSources = useMemo(() => {
-    const sources = new Set<string>();
-    for (const p of MOCK_POOLS) {
-      if (p.dataSource === "demo") {
-        sources.add(PROTOCOL_TO_SOURCE[p.protocol]);
-      }
-    }
-    return sources;
-  }, []);
-
-  const activeErrorBanners = useMemo(
-    () =>
-      Array.from(demoSources).filter(
-        (src) => !dismissedErrors.includes(`demo-${src}`),
-      ),
-    [demoSources, dismissedErrors],
+  const setSelection = useCallback(
+    (next: string[]) => {
+      void navigate({
+        to: "/pool-comparison",
+        search: { pools: next.length > 0 ? next.join(",") : undefined },
+        replace: true,
+      });
+    },
+    [navigate],
   );
 
-  function handleSort(key: SortKey) {
-    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(key);
-      setSortDir("desc");
+  // A selection made elsewhere (Pools page) moves into the URL once on arrival.
+  const adopted = useRef(false);
+  useEffect(() => {
+    if (adopted.current) return;
+    adopted.current = true;
+    if (selectedIds.length > 0) return;
+    const stored = useDefiStore.getState().selectedPoolIds;
+    if (stored.length > 0) setSelection(stored.slice(0, MAX_POOLS));
+  }, [selectedIds, setSelection]);
+
+  // The URL is the source of truth; mirror it into the store.
+  useEffect(() => {
+    useDefiStore.setState({ selectedPoolIds: selectedIds });
+  }, [selectedIds]);
+
+  const { selectedPools, missingIds } = useMemo(() => {
+    const found: Pool[] = [];
+    const missing: string[] = [];
+    for (const id of selectedIds) {
+      const match = pools.data.find((p) => p.id === id || p.poolId === id);
+      if (match) found.push(match);
+      else missing.push(id);
     }
-    setPage(1);
-  }
+    return { selectedPools: found, missingIds: missing };
+  }, [selectedIds, pools.data]);
 
-  function toggleWatchlist(poolId: string) {
-    const isCurrentlyWatched = watchlist.includes(poolId);
-    setWatchlist((prev) =>
-      isCurrentlyWatched
-        ? prev.filter((id) => id !== poolId)
-        : [...prev, poolId],
-    );
-    if (isCurrentlyWatched) {
-      setAlertPools((prev) => prev.filter((id) => id !== poolId));
-      toast.info("Pool removed from watchlist");
-    } else {
-      toast.info("Pool added to watchlist");
-    }
-  }
+  const showMissing = !pools.isLoading && missingIds.length > 0;
 
-  function toggleAlert(poolId: string) {
-    const hasAlert = alertPools.includes(poolId);
-    setAlertPools((prev) =>
-      hasAlert ? prev.filter((id) => id !== poolId) : [...prev, poolId],
-    );
-    if (hasAlert) toast.info("Price alert disabled");
-    else toast.success("Price alert enabled");
-  }
+  const h0 = usePoolHistory(selectedPools[0]?.id);
+  const h1 = usePoolHistory(selectedPools[1]?.id);
+  const h2 = usePoolHistory(selectedPools[2]?.id);
+  const h3 = usePoolHistory(selectedPools[3]?.id);
+  const histories = [h0, h1, h2, h3].slice(0, selectedPools.length);
 
-  const filtered = useMemo(() => {
-    let pools = MOCK_POOLS;
-    if (activeProtocol !== "all")
-      pools = pools.filter((p) => p.protocol === activeProtocol);
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      pools = pools.filter(
+  const [query, setQuery] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [showSignIn, setShowSignIn] = useState(false);
+  const copyTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(copyTimer.current), []);
+
+  const candidates = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return pools.data
+      .filter((p) => !selectedIds.includes(p.id))
+      .filter(
         (p) =>
+          !q ||
           p.name.toLowerCase().includes(q) ||
-          p.token0.toLowerCase().includes(q) ||
-          p.token1.toLowerCase().includes(q),
-      );
-    }
-    return sortPools(pools, sortKey, sortDir);
-  }, [activeProtocol, search, sortKey, sortDir]);
+          p.chain.toLowerCase().includes(q) ||
+          (p.project ?? p.protocol).toLowerCase().includes(q),
+      )
+      .sort((a, b) => b.stats.tvl - a.stats.tvl)
+      .slice(0, 8);
+  }, [pools.data, selectedIds, query]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pagePools = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-  const watchedPools = useMemo(
-    () => MOCK_POOLS.filter((p) => watchlist.includes(p.id)),
-    [watchlist],
+  const watchedKeys = useMemo(
+    () => new Set((watchlist.data ?? []).map((entry) => entry.poolId)),
+    [watchlist.data],
   );
 
-  function handleProtocolChange(id: Protocol | "all") {
-    setActiveProtocol(id);
-    setPage(1);
+  const isFull = selectedIds.length >= MAX_POOLS;
+  const watchBusy = addWatch.isPending || removeWatch.isPending;
+
+  function addPool(pool: Pool) {
+    if (isFull) return;
+    setSelection([...selectedIds, pool.id]);
+    setQuery("");
   }
 
-  function handleSearch(e: React.ChangeEvent<HTMLInputElement>) {
-    setSearch(e.target.value);
-    setPage(1);
+  function removeId(id: string) {
+    setSelection(selectedIds.filter((x) => x !== id));
+  }
+
+  function dropMissing() {
+    setSelection(selectedIds.filter((id) => !missingIds.includes(id)));
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      toast.success("Comparison link copied");
+      window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 3000);
+    } catch {
+      toast.error("Could not copy. Copy the address from the browser bar.");
+    }
+  }
+
+  function toggleWatch(pool: Pool) {
+    if (!isAuthenticated) {
+      setShowSignIn(true);
+      return;
+    }
+    const key = poolKey(pool);
+    if (watchedKeys.has(key)) {
+      removeWatch.mutate(key, {
+        onSuccess: () => toast.info(`${pool.name} removed from watchlist`),
+        onError: () => toast.error("Could not update the watchlist"),
+      });
+      return;
+    }
+    addWatch.mutate(
+      {
+        poolId: key,
+        displayName: pool.name,
+        chain: pool.chain,
+        symbol:
+          [pool.token0, pool.token1].filter((t) => t && t !== "—").join("-") ||
+          pool.name,
+        project: pool.project ?? pool.protocol,
+      },
+      {
+        onSuccess: () => toast.success(`${pool.name} added to watchlist`),
+        onError: (error) => toast.error(error.message),
+      },
+    );
+  }
+
+  function exportRows() {
+    return selectedPools.map((pool, i) => {
+      const risk = computeRiskScore(pool, histories[i]?.data);
+      return { pool, risk };
+    });
   }
 
   function handleExportCSV() {
-    const headers = [
-      "Pool Name",
-      "Protocol",
-      "Chain",
-      "TVL",
-      "APY 24h",
-      "APY 7d",
-      "APY 30d",
-      "24h Volume",
-      "Daily Fees",
-      "IL Risk",
-    ];
-    const rows = filtered.map((p) => [
-      p.name,
-      p.protocol,
-      p.chain,
-      formatTVL(p.stats.tvl),
-      `${p.apy.current.toFixed(2)}%`,
-      `${p.apy.day7Avg.toFixed(2)}%`,
-      `${p.apy.day30Avg.toFixed(2)}%`,
-      formatTVL(p.stats.volume24h),
-      formatFees(p.stats.fees24h),
-      p.ilRisk,
-    ]);
-    exportCSV(
-      `pools-${new Date().toISOString().slice(0, 10)}.csv`,
-      headers,
-      rows,
+    const source = pools.isDemo ? "Demo data" : "Live (DefiLlama)";
+    const ok = exportCSV(
+      `pool-comparison-${new Date().toISOString().slice(0, 10)}.csv`,
+      [
+        "Pool",
+        "Project",
+        "Chain",
+        "TVL (USD)",
+        "24h volume (USD)",
+        "Est. 24h fees (USD)",
+        "APY now (%)",
+        "APY 7d avg (%)",
+        "APY 30d avg (%)",
+        "Risk score (1-10)",
+        "Risk level",
+        "Pool ID",
+        "Data source",
+      ],
+      exportRows().map(({ pool, risk }) => [
+        pool.name,
+        pool.project ?? pool.protocol,
+        pool.chain,
+        pool.stats.tvl.toFixed(0),
+        pool.stats.volume24h.toFixed(0),
+        pool.stats.fees24h.toFixed(0),
+        pool.apy.current.toFixed(2),
+        pool.apy.day7Avg.toFixed(2),
+        pool.apy.day30Avg.toFixed(2),
+        String(risk.score),
+        risk.level,
+        poolKey(pool),
+        source,
+      ]),
     );
-    toast.success("Pool data exported to CSV");
+    if (ok) toast.success("Comparison exported to CSV");
+    else toast.error("CSV export failed");
   }
 
   function handleExportPDF() {
-    const date = new Date().toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-    const topPool = filtered[0];
-    const avgAPY =
-      filtered.reduce((s, p) => s + p.apy.current, 0) / (filtered.length || 1);
-    exportPDF({
-      title: "DeFi Pool Analytics \u2013 Pool Comparator Report",
-      date,
-      walletAddress: "Pool Comparator View",
+    const rows = exportRows();
+    const best = [...selectedPools].sort(
+      (a, b) => b.apy.current - a.apy.current,
+    )[0];
+    const totalTvl = selectedPools.reduce((sum, p) => sum + p.stats.tvl, 0);
+    const ok = exportPDF({
+      title: `Pool Comparison Report${pools.isDemo ? " (Demo data)" : ""}`,
+      date: new Date().toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }),
+      subtitle: "Pool Comparison Report",
+      metaLabel: "Data source:",
+      walletAddress: pools.isDemo ? "Demo data" : "Live data via DefiLlama",
       summary: [
-        { label: "Pools Shown", value: String(filtered.length) },
-        { label: "Avg APY", value: `${avgAPY.toFixed(2)}%` },
-        { label: "Top Pool (APY)", value: topPool?.name ?? "N/A" },
-        { label: "Watchlisted", value: String(watchlist.length) },
+        { label: "Pools compared", value: String(selectedPools.length) },
+        { label: "Highest APY", value: best ? pct(best.apy.current) : "N/A" },
+        { label: "Combined TVL", value: usd(totalTvl) },
+        { label: "Data", value: pools.isDemo ? "Demo" : "Live" },
       ],
-      sections: [
-        {
-          title: "Watchlisted Pools",
-          rows: watchedPools.length
-            ? watchedPools.map((p) => ({
-                label: p.name,
-                value: `${p.apy.current.toFixed(2)}% APY \u2022 ${p.ilRisk} IL \u2022 ${formatTVL(p.stats.tvl)} TVL`,
-              }))
-            : [{ label: "No watchlisted pools", value: "" }],
-        },
-      ],
+      sections: rows.map(({ pool, risk }) => ({
+        title: `${pool.name} · risk ${risk.score}/10 (${risk.level})`,
+        rows: risk.factors.map((f) => ({
+          label: f.label,
+          value: `${f.impact} · ${f.explanation}`,
+        })),
+      })),
       tableHeaders: [
         "Pool",
-        "Protocol",
         "Chain",
         "TVL",
-        "APY 24h",
+        "Volume 24h",
+        "Fees 24h",
+        "APY",
         "APY 7d",
         "APY 30d",
-        "Volume",
-        "Fees",
-        "IL Risk",
+        "Risk",
       ],
-      tableRows: filtered.map((p) => [
-        p.name,
-        p.protocol,
-        p.chain,
-        formatTVL(p.stats.tvl),
-        `${p.apy.current.toFixed(2)}%`,
-        `${p.apy.day7Avg.toFixed(2)}%`,
-        `${p.apy.day30Avg.toFixed(2)}%`,
-        formatTVL(p.stats.volume24h),
-        formatFees(p.stats.fees24h),
-        p.ilRisk,
+      tableRows: rows.map(({ pool, risk }) => [
+        pool.name,
+        pool.chain,
+        usd(pool.stats.tvl),
+        usd(pool.stats.volume24h),
+        usd(pool.stats.fees24h),
+        pct(pool.apy.current),
+        pct(pool.apy.day7Avg),
+        pct(pool.apy.day30Avg),
+        `${risk.score}/10`,
       ]),
     });
-    toast.success("Comparison report generated");
+    if (ok) toast.success("Comparison report opened for printing");
+    else toast.error("Allow pop-ups for this site to generate the PDF report");
   }
 
-  // Visible columns depending on mobile state
-  const visibleColumns = COLUMNS.filter(
-    (col) => showAllColumns || !col.mobileHidden,
+  const hasSelection = selectedPools.length > 0;
+  const riskScores = selectedPools.map(
+    (pool, i) => computeRiskScore(pool, histories[i]?.data).score,
   );
 
-  // Total colspan for empty state
-  const totalCols = visibleColumns.length + 3; // star + trend + visible cols
-
-  const chartLastUpdated = lastUpdatedBySource.poolComparison ?? undefined;
-
   return (
-    <div className="space-y-5 py-6 px-4 md:px-6">
-      {/* Breadcrumb */}
-      <Breadcrumb
-        items={[{ label: "Home", href: "/" }, { label: "Pool Comparator" }]}
-      />
-
-      {/* Error Banners */}
-      {activeErrorBanners.length > 0 && (
-        <div className="space-y-2">
-          {activeErrorBanners.map((src) => (
-            <ErrorBanner
-              key={src}
-              source={src}
-              type="warning"
-              message={`${src} data unavailable — showing cached data`}
-              onDismiss={() => dismissError(`demo-${src}`)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1
-            className="text-2xl font-display font-bold tracking-tight"
-            style={{ color: "#e0e0e0" }}
-          >
-            Pool Comparison
-          </h1>
-          <p
-            className="text-sm mt-1 uppercase"
-            style={{
-              color: "#505050",
-              letterSpacing: "0.05em",
-              fontSize: "11px",
-            }}
-          >
-            Sort, filter &amp; find the best cross-chain opportunities
+    <div className="space-y-6 px-4 py-6 md:px-6" data-ocid="comparison.page">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="font-display text-2xl font-bold tracking-tight">
+              Pool Comparison
+            </h1>
+            {pools.isDemo && <DemoBadge />}
+          </div>
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+            Compare up to {MAX_POOLS} pools side by side · selection lives in
+            the page link
           </p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <div
-            className="relative"
-            onMouseEnter={() => setShowTooltip(true)}
-            onMouseLeave={() => setShowTooltip(false)}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-ocid="comparison.copy_link_button"
+            onClick={() => void copyLink()}
+            disabled={!hasSelection && selectedIds.length === 0}
           >
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md transition-all duration-200"
-              data-ocid="pool-comparison.cross_chain_info_button"
-              aria-label="Cross-chain comparison info"
-              style={{
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                color: "#606060",
-              }}
-            >
-              <Info className="w-3.5 h-3.5" />
-              Cross-chain
-            </button>
-            {showTooltip && (
-              <div
-                className="absolute right-0 top-full mt-2 w-72 z-50 rounded-lg p-3 text-xs"
-                data-ocid="pool-comparison.cross_chain_tooltip"
-                style={{
-                  background: "rgba(10,10,10,0.98)",
-                  backdropFilter: "blur(16px)",
-                  border: "1px solid rgba(0,163,255,0.2)",
-                  boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
-                  color: "#909090",
-                }}
-              >
-                <p className="font-semibold mb-1" style={{ color: "#e0e0e0" }}>
-                  Cross-chain Pool Comparison
-                </p>
-                <p className="leading-relaxed">
-                  Use the protocol filter tabs below to compare liquidity pools
-                  across Ethereum, BSC, Solana, and Internet Computer.
-                </p>
-              </div>
+            {copied ? (
+              <Check className="mr-1.5 h-4 w-4 text-success" aria-hidden />
+            ) : (
+              <Link2 className="mr-1.5 h-4 w-4" aria-hidden />
             )}
-          </div>
-          <button
+            {copied ? "Link copied" : "Copy link"}
+          </Button>
+          <Button
             type="button"
-            data-ocid="pool-comparison.export_csv_button"
+            variant="outline"
+            size="sm"
+            data-ocid="comparison.export_csv_button"
             onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 text-xs rounded-md px-2.5 py-1.5 transition-all duration-200"
-            style={{
-              background: "rgba(0,255,136,0.05)",
-              border: "1px solid rgba(0,255,136,0.25)",
-              color: "#00FF88",
-            }}
+            disabled={!hasSelection}
           >
-            <FileText className="w-3.5 h-3.5" />
+            <FileText className="mr-1.5 h-4 w-4" aria-hidden />
             Export CSV
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            data-ocid="pool-comparison.export_pdf_button"
+            variant="outline"
+            size="sm"
+            data-ocid="comparison.export_pdf_button"
             onClick={handleExportPDF}
-            className="inline-flex items-center gap-1.5 text-xs rounded-md px-2.5 py-1.5 transition-all duration-200"
-            style={{
-              background: "rgba(0,163,255,0.05)",
-              border: "1px solid rgba(0,163,255,0.25)",
-              color: "#00A3FF",
-            }}
+            disabled={!hasSelection}
           >
-            <FileText className="w-3.5 h-3.5" />
+            <FileText className="mr-1.5 h-4 w-4" aria-hidden />
             Export PDF
-          </button>
+          </Button>
         </div>
-      </div>
+      </header>
 
-      {/* Watchlist */}
-      {watchedPools.length > 0 && (
+      <output className="sr-only" aria-live="polite">
+        {copied ? "Comparison link copied to clipboard" : ""}
+      </output>
+
+      {pools.isError && (
+        <ErrorState
+          title="Live pool data unavailable"
+          message={
+            pools.isDemo
+              ? "DefiLlama could not be reached. Demo pools are shown instead and are labelled as demo data."
+              : "The latest refresh failed. Showing the most recently loaded pools."
+          }
+          onRetry={pools.refetch}
+        />
+      )}
+
+      {showMissing && (
         <div
-          data-ocid="watchlist.section"
-          className="rounded-xl p-4"
-          style={{
-            background: "rgba(0,255,136,0.03)",
-            border: "1px solid rgba(0,255,136,0.15)",
-          }}
+          data-ocid="comparison.missing_ids"
+          role="alert"
+          className="flex flex-col gap-3 rounded-lg border border-warning/50 bg-warning/10 p-4 text-sm sm:flex-row sm:items-center sm:justify-between"
         >
-          <div className="flex items-center gap-2 mb-3">
-            <Star
-              className="w-4 h-4"
-              style={{
-                color: "#00FF88",
-                filter: "drop-shadow(0 0 6px rgba(0,255,136,0.6))",
-                fill: "#00FF88",
-              }}
+          <div className="flex items-start gap-3">
+            <TriangleAlert
+              className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+              aria-hidden
             />
-            <h2
-              className="text-sm font-semibold uppercase"
-              style={{ color: "#e0e0e0", letterSpacing: "0.08em" }}
-            >
-              Watchlist
-            </h2>
-            <span className="text-xs" style={{ color: "#505050" }}>
-              {watchedPools.length} pool{watchedPools.length !== 1 ? "s" : ""}
-            </span>
+            <p className="min-w-0 break-words">
+              {missingIds.length === 1
+                ? "This pool identifier from the link was not found in the loaded pool list: "
+                : "These pool identifiers from the link were not found in the loaded pool list: "}
+              {missingIds.map((id, i) => (
+                <span key={id}>
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                    {id}
+                  </code>
+                  {i < missingIds.length - 1 ? ", " : ""}
+                </span>
+              ))}
+              .{" "}
+              {hasSelection
+                ? "The remaining pools are shown below."
+                : "Search below to pick other pools."}
+            </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {watchedPools.map((pool) => (
-              <WatchlistPoolCard
-                key={pool.id}
-                pool={pool}
-                hasAlert={alertPools.includes(pool.id)}
-                onToggleAlert={() => toggleAlert(pool.id)}
-                onRemove={() => toggleWatchlist(pool.id)}
-              />
-            ))}
-          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-ocid="comparison.remove_missing_button"
+            onClick={dropMissing}
+          >
+            Remove from link
+          </Button>
         </div>
       )}
 
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <ChartPanel
-          title="APY Trend — Top Pools (7d)"
-          source="Uniswap"
-          lastUpdatedTs={chartLastUpdated}
+      {ignoredIds.length > 0 && (
+        <p
+          data-ocid="comparison.ignored_ids"
+          className="rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground"
         >
-          <APYTrendChart pools={filtered} />
-        </ChartPanel>
-        <ChartPanel
-          title="Daily Fee Comparison"
-          source="ICPSwap"
-          lastUpdatedTs={chartLastUpdated}
-        >
-          <FeeComparisonChart pools={filtered} />
-        </ChartPanel>
-        <ChartPanel
-          title="Security Score"
-          source="KongSwap"
-          lastUpdatedTs={chartLastUpdated}
-        >
-          <SecurityScoreChart pools={filtered} />
-        </ChartPanel>
-      </div>
+          Only the first {MAX_POOLS} pools in the link are compared. Ignored:{" "}
+          <span className="font-mono">{ignoredIds.join(", ")}</span>
+        </p>
+      )}
 
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div
-          className="flex items-center gap-1 p-1 rounded-lg overflow-x-auto"
-          data-ocid="pool-comparison.protocol_filter"
-          style={{
-            background: "rgba(13,13,13,0.6)",
-            border: "1px solid rgba(0,163,255,0.12)",
-          }}
-        >
-          {PROTOCOLS.map(({ id, label }) => (
-            <button
-              key={id}
+      {showSignIn && !isAuthenticated && (
+        <SignInPrompt feature="your pool watchlist" />
+      )}
+
+      {pools.isLoading ? (
+        <LoadingState label="Loading live pools from DefiLlama…" />
+      ) : pools.data.length === 0 ? (
+        <EmptyState
+          title="No pools available"
+          description="The data source returned no pools to compare."
+          action={
+            <Button
               type="button"
-              onClick={() => handleProtocolChange(id as Protocol | "all")}
-              data-ocid={`pool-comparison.protocol_tab.${id}`}
-              className="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-all duration-200"
-              style={{
-                background:
-                  activeProtocol === id
-                    ? "rgba(0,163,255,0.15)"
-                    : "transparent",
-                border:
-                  activeProtocol === id
-                    ? "1px solid rgba(0,163,255,0.35)"
-                    : "1px solid transparent",
-                color: activeProtocol === id ? "#00A3FF" : "#606060",
-                textShadow:
-                  activeProtocol === id
-                    ? "0 0 8px rgba(0,163,255,0.5)"
-                    : "none",
-              }}
+              size="sm"
+              variant="outline"
+              data-ocid="comparison.reload_button"
+              onClick={pools.refetch}
             >
-              {id !== "all" && (
-                <span
-                  className="inline-block w-1.5 h-1.5 rounded-full mr-1.5"
-                  style={{
-                    backgroundColor:
-                      activeProtocol === id ? "#00A3FF" : "#404040",
-                    boxShadow:
-                      activeProtocol === id
-                        ? "0 0 4px rgba(0,163,255,0.8)"
-                        : "none",
-                  }}
-                />
-              )}
-              {label}
-            </button>
-          ))}
-        </div>
-
-        <div className="relative flex-1 sm:max-w-xs">
-          <Search
-            className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
-            style={{ color: searchFocused ? "#00A3FF" : "#505050" }}
-          />
-          <input
-            placeholder="Search pool or token..."
-            value={search}
-            onChange={handleSearch}
-            onFocus={() => setSearchFocused(true)}
-            onBlur={() => setSearchFocused(false)}
-            className="w-full pl-9 pr-4 text-sm h-9 rounded-lg outline-none transition-all duration-200"
-            data-ocid="pool-comparison.search_input"
-            style={{
-              background: "rgba(13,13,13,0.8)",
-              backdropFilter: "blur(8px)",
-              border: searchFocused
-                ? "1px solid rgba(0,163,255,0.5)"
-                : "1px solid rgba(0,163,255,0.15)",
-              boxShadow: searchFocused
-                ? "0 0 0 2px rgba(0,163,255,0.1)"
-                : "none",
-              color: "#c0c0c0",
-            }}
-          />
-        </div>
-
-        {/* Mobile column toggle */}
-        <button
-          type="button"
-          data-ocid="pool-comparison.toggle_columns_button"
-          onClick={() => setShowAllColumns((v) => !v)}
-          className="sm:hidden inline-flex items-center gap-1.5 text-xs h-9 px-3 rounded-lg transition-all duration-200"
-          style={{
-            background: showAllColumns
-              ? "rgba(0,163,255,0.12)"
-              : "rgba(255,255,255,0.04)",
-            border: showAllColumns
-              ? "1px solid rgba(0,163,255,0.3)"
-              : "1px solid rgba(255,255,255,0.08)",
-            color: showAllColumns ? "#00A3FF" : "#606060",
-          }}
-        >
-          <Columns className="w-3.5 h-3.5" />
-          {showAllColumns ? "Less" : "More Columns"}
-        </button>
-      </div>
-
-      {/* Table Card */}
-      <div
-        className="rounded-xl overflow-hidden"
-        style={{
-          background: "rgba(13,13,13,0.8)",
-          backdropFilter: "blur(10px)",
-          border: "1px solid rgba(0,163,255,0.15)",
-          boxShadow: "0 4px 32px rgba(0,0,0,0.4)",
-        }}
-      >
-        {isLoading ? (
-          <div className="p-4">
-            <SkeletonTable rows={10} />
-          </div>
-        ) : MOCK_POOLS.length === 0 ? (
-          <div
-            className="flex flex-col items-center justify-center py-20 gap-3"
-            data-ocid="pool-comparison.global_empty_state"
+              <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+              Reload pools
+            </Button>
+          }
+        />
+      ) : (
+        <>
+          <section
+            data-ocid="comparison.picker"
+            className="space-y-3 rounded-lg border border-border bg-card p-4"
+            aria-labelledby="picker-heading"
           >
-            <ArrowUpDown
-              className="w-10 h-10"
-              style={{ color: "rgba(0,163,255,0.2)" }}
-            />
-            <p className="font-medium" style={{ color: "#505050" }}>
-              No pools available for comparison
-            </p>
-            <p className="text-xs" style={{ color: "#333" }}>
-              Pool data will appear here once loaded.
-            </p>
-          </div>
-        ) : (
-          <>
-            <div className="relative overflow-x-auto">
-              <div
-                className="pointer-events-none absolute right-0 top-0 h-full w-8 md:hidden z-10"
-                style={{
-                  background:
-                    "linear-gradient(to left, rgba(13,13,13,0.9), transparent)",
-                }}
-              />
-              <table
-                className="w-full text-sm"
-                style={{ minWidth: showAllColumns ? "1000px" : "540px" }}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2
+                id="picker-heading"
+                className="font-display text-sm font-semibold uppercase tracking-wider"
               >
-                <thead>
-                  <tr
-                    style={{
-                      borderBottom: "1px solid rgba(0,163,255,0.15)",
-                      background: "rgba(0,163,255,0.04)",
-                    }}
-                  >
-                    {/* Star col */}
-                    <th className="px-2 py-3 w-8" />
-                    {visibleColumns.map((col) => (
-                      <th
-                        key={col.key}
-                        onClick={() => handleSort(col.key)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ")
-                            handleSort(col.key);
-                        }}
-                        className="px-4 py-3 whitespace-nowrap select-none cursor-pointer transition-all duration-150"
-                        style={{
-                          textAlign: col.align === "right" ? "right" : "left",
-                          color: sortKey === col.key ? "#00A3FF" : "#505050",
-                          textShadow:
-                            sortKey === col.key
-                              ? "0 0 8px rgba(0,163,255,0.5)"
-                              : "none",
-                          fontSize: "10px",
-                          fontWeight: 600,
-                          letterSpacing: "0.08em",
-                          textTransform: "uppercase",
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleSort(col.key);
-                          }}
-                          data-ocid={`pool-comparison.sort.${col.key}`}
-                          className="inline-flex items-center gap-1.5 transition-all duration-150"
-                          style={{
-                            flexDirection:
-                              col.align === "right" ? "row-reverse" : "row",
-                            color: sortKey === col.key ? "#00A3FF" : "#505050",
-                          }}
-                        >
-                          {col.label}
-                          <SortIcon
-                            active={sortKey === col.key}
-                            direction={sortDir}
-                          />
-                        </button>
-                        {col.helpTerm && (
-                          <span className="inline-flex ml-1">
-                            <HelpIcon term={col.helpTerm} variant="sm" />
-                          </span>
-                        )}
-                      </th>
-                    ))}
-                    {/* Trend col */}
-                    <th
-                      className="px-3 py-3 whitespace-nowrap"
-                      style={{
-                        color: "#505050",
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        letterSpacing: "0.08em",
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      Trend
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pagePools.length === 0 ? (
-                    <tr>
-                      <td colSpan={totalCols}>
-                        <div
-                          className="flex flex-col items-center justify-center py-16 gap-3"
-                          data-ocid="pool-comparison.empty_state"
-                        >
-                          <ArrowUpDown
-                            className="w-8 h-8"
-                            style={{ color: "rgba(0,163,255,0.2)" }}
-                          />
-                          <p className="text-sm" style={{ color: "#505050" }}>
-                            No pools match your filters.
-                          </p>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setSearch("");
-                              setActiveProtocol("all");
-                            }}
-                            style={{ color: "#00A3FF" }}
-                          >
-                            Clear filters
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    pagePools.map((pool, idx) => {
-                      const rowNum = (page - 1) * PAGE_SIZE + idx + 1;
-                      const isWatched = watchlist.includes(pool.id);
-                      return (
-                        <TableRow
-                          key={pool.id}
-                          pool={pool}
-                          rowNum={rowNum}
-                          isWatched={isWatched}
-                          page={page}
-                          showAllColumns={showAllColumns}
-                          onToggleWatchlist={() => toggleWatchlist(pool.id)}
-                        />
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
+                Add pools ({selectedIds.length}/{MAX_POOLS})
+              </h2>
+              {hasSelection && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  data-ocid="comparison.clear_button"
+                  onClick={() => setSelection([])}
+                >
+                  Clear selection
+                </Button>
+              )}
             </div>
-
-            {/* Pagination */}
-            <div
-              className="flex items-center justify-between px-4 py-3"
-              style={{ borderTop: "1px solid rgba(0,163,255,0.1)" }}
-            >
-              <p className="text-xs" style={{ color: "#505050" }}>
-                Showing{" "}
-                <span style={{ color: "#c0c0c0" }}>
-                  {filtered.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1}
-                  &ndash;
-                  {Math.min(page * PAGE_SIZE, filtered.length)}
-                </span>{" "}
-                of <span style={{ color: "#c0c0c0" }}>{filtered.length}</span>{" "}
-                pools
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by token pair, project or chain"
+                aria-label="Search pools to compare"
+                data-ocid="comparison.search_input"
+                className="pl-9"
+              />
+            </div>
+            {isFull && (
+              <p className="text-xs text-muted-foreground">
+                Four pools selected. Remove one to add another.
               </p>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  data-ocid="pool-comparison.pagination_prev"
-                  className="h-7 px-3 text-xs rounded-md transition-all duration-200 disabled:opacity-30"
-                  style={{
-                    background: "rgba(0,163,255,0.08)",
-                    border: "1px solid rgba(0,163,255,0.2)",
-                    color: "#00A3FF",
-                  }}
-                >
-                  Previous
-                </button>
-                <span
-                  className="text-xs font-mono tabular-nums"
-                  style={{ color: "#505050" }}
-                >
-                  {page} / {totalPages}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                  data-ocid="pool-comparison.pagination_next"
-                  className="h-7 px-3 text-xs rounded-md transition-all duration-200 disabled:opacity-30"
-                  style={{
-                    background: "rgba(0,163,255,0.08)",
-                    border: "1px solid rgba(0,163,255,0.2)",
-                    color: "#00A3FF",
-                  }}
-                >
-                  Next
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
+            )}
+            {candidates.length === 0 ? (
+              <p
+                data-ocid="comparison.no_results"
+                className="py-2 text-sm text-muted-foreground"
+              >
+                No pools match “{query}”.
+              </p>
+            ) : (
+              <ul className="grid gap-2 sm:grid-cols-2">
+                {candidates.map((pool, i) => (
+                  <li key={pool.id}>
+                    <button
+                      type="button"
+                      data-ocid={`comparison.candidate.${i + 1}`}
+                      onClick={() => addPool(pool)}
+                      disabled={isFull}
+                      className="flex w-full items-center gap-3 rounded-md border border-border bg-background px-3 py-2 text-left text-sm transition-colors hover:border-primary hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Plus
+                        className="h-4 w-4 shrink-0 text-primary"
+                        aria-hidden
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">
+                          {pool.name}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {pool.project ?? pool.protocol} · {pool.chain}
+                        </span>
+                      </span>
+                      <span className="text-right font-mono text-xs tabular-nums">
+                        <span className="block text-accent">
+                          {pct(pool.apy.current)}
+                        </span>
+                        <span className="block text-muted-foreground">
+                          {usd(pool.stats.tvl)}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {!hasSelection ? (
+            <EmptyState
+              title={
+                selectedIds.length > 0
+                  ? "None of the linked pools could be found"
+                  : "No pools selected"
+              }
+              description="Pick two to four pools above to compare APY, TVL, volume, fees, risk and APY history."
+            />
+          ) : (
+            <>
+              <section
+                data-ocid="comparison.table"
+                className="overflow-x-auto rounded-lg border border-border bg-card"
+                aria-label="Pool comparison table"
+              >
+                <table className="w-full min-w-[640px] border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/40">
+                      <th
+                        scope="col"
+                        className="sticky left-0 w-32 bg-muted p-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+                      >
+                        Metric
+                      </th>
+                      {selectedPools.map((pool, i) => {
+                        const watched = watchedKeys.has(poolKey(pool));
+                        return (
+                          <th
+                            key={pool.id}
+                            scope="col"
+                            className="min-w-[180px] p-3 text-left align-top font-normal"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={cn(
+                                      "h-2.5 w-2.5 shrink-0 rounded-full",
+                                      SERIES[i].dot,
+                                    )}
+                                    aria-hidden
+                                  />
+                                  <span className="truncate font-display font-semibold">
+                                    {pool.name}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                  {pool.project ?? pool.protocol} · {pool.chain}
+                                </p>
+                              </div>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                className="h-7 w-7 shrink-0"
+                                aria-label={`Remove ${pool.name} from comparison`}
+                                data-ocid={`comparison.remove_button.${i + 1}`}
+                                onClick={() => removeId(pool.id)}
+                              >
+                                <X className="h-4 w-4" aria-hidden />
+                              </Button>
+                            </div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant={watched ? "secondary" : "outline"}
+                              className="mt-2"
+                              aria-pressed={watched}
+                              data-ocid={`comparison.watch_button.${i + 1}`}
+                              onClick={() => toggleWatch(pool)}
+                              disabled={watchBusy || pools.isDemo}
+                              title={
+                                pools.isDemo
+                                  ? "Demo pools cannot be saved to a watchlist"
+                                  : undefined
+                              }
+                            >
+                              <Star
+                                className={cn(
+                                  "mr-1.5 h-3.5 w-3.5",
+                                  watched && "fill-current text-accent",
+                                )}
+                                aria-hidden
+                              />
+                              {watched ? "Watching" : "Watch"}
+                            </Button>
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {METRICS.map((metric) => {
+                      const values = selectedPools.map(metric.value);
+                      const best = bestIndex(values, metric.better);
+                      return (
+                        <tr
+                          key={metric.key}
+                          data-ocid={`comparison.row.${metric.key}`}
+                          className="border-b border-border/60"
+                        >
+                          <th
+                            scope="row"
+                            className="sticky left-0 bg-card p-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground"
+                          >
+                            {metric.label}
+                          </th>
+                          {values.map((value, i) => (
+                            <td
+                              key={selectedPools[i].id}
+                              className={cn(
+                                "p-3 font-mono tabular-nums",
+                                i === best && "font-semibold text-accent",
+                              )}
+                            >
+                              {metric.format(value)}
+                              {i === best && (
+                                <span className="ml-2 text-[10px] uppercase tracking-wider">
+                                  best
+                                </span>
+                              )}
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                    <tr data-ocid="comparison.row.risk">
+                      <th
+                        scope="row"
+                        className="sticky left-0 bg-card p-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground"
+                      >
+                        Risk score
+                      </th>
+                      {selectedPools.map((pool, i) => (
+                        <td key={pool.id} className="p-3">
+                          <RiskBadge pool={pool} history={histories[i]?.data} />
+                          {i === bestIndex(riskScores, "low") && (
+                            <span className="ml-2 text-[10px] uppercase tracking-wider text-accent">
+                              lowest
+                            </span>
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+              <p className="text-xs text-muted-foreground">
+                Hover or focus a risk badge to see the factors behind the score.
+                Fees are estimated from 24h volume and the pool fee tier.
+              </p>
+
+              <HistoryChart pools={selectedPools} histories={histories} />
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }

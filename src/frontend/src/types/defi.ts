@@ -1,30 +1,6 @@
-/** Breadcrumb navigation item */
-export interface BreadcrumbItem {
-  label: string;
-  href?: string;
-}
-
-/** Data source information with freshness status */
-export interface DataSourceInfo {
-  source: string;
-  lastUpdated: Date | null;
-  status: "live" | "cached" | "demo";
-}
-
-/** Union of all defined help term keys */
-export type HelpTermKey =
-  | "APY"
-  | "TVL"
-  | "ImpermanentLoss"
-  | "FundingRate"
-  | "LongShortRatio";
-
 export type Protocol = "uniswap" | "pancakeswap" | "raydium" | "icp";
 
 export type ILRisk = "low" | "medium" | "high";
-
-/** Indicates where the pool data originated from. */
-export type DataSourceStatus = "live" | "cached" | "demo";
 
 export interface APYDataPoint {
   date: string;
@@ -61,24 +37,30 @@ export interface Pool {
   ilRisk: ILRisk;
   chain: string;
   address: string;
-  /** Data freshness indicator — set by poolDataService */
-  dataSource?: DataSourceStatus;
-  /** Unix timestamp (ms) of last successful data fetch */
-  lastUpdated?: number;
-  /** 0–100 security / audit score */
-  securityScore?: number;
-  /** Human-readable compounding frequency label */
-  compoundingFrequency?: string;
+  /** DefiLlama pool UUID. Absent on demo pools, whose `id` is the key. */
+  poolId?: string;
+  /** Real project slug, for example "uniswap-v3" (protocol is a coarse bucket). */
+  project?: string;
+  apyBase?: number;
+  apyReward?: number;
+  stablecoin?: boolean;
+  /** Standard deviation of APY changes reported by DefiLlama. */
+  sigma?: number;
 }
 
-/** Structured risk assessment for a pool. All sub-scores 0–100 (higher = safer). */
-export interface RiskScore {
-  tvlStabilityScore: number;
-  tokenConcentrationScore: number;
-  ilRiskScore: number;
-  protocolAgeScore: number;
-  overallScore: number;
-  overallRating: "low" | "medium" | "high";
+/** One daily point of per-pool history (live or demo). */
+export interface PoolHistoryPoint {
+  date: string;
+  timestamp: number;
+  apy: number;
+  apyBase: number;
+  apyReward: number;
+  tvlUsd: number;
+}
+
+export interface TokenPrice {
+  usd: number;
+  change24h: number;
 }
 
 export interface Position {
